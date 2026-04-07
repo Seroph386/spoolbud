@@ -77,6 +77,12 @@ code {
   gap: 0.1rem;
 }
 
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .brand a {
   color: var(--text);
   text-decoration: none;
@@ -100,6 +106,7 @@ code {
 }
 
 .nav-link,
+.menu-toggle,
 .theme-toggle,
 .button {
   appearance: none;
@@ -115,6 +122,7 @@ code {
 }
 
 .nav-link:hover,
+.menu-toggle:hover,
 .theme-toggle:hover,
 .button:hover {
   transform: translateY(-1px);
@@ -125,6 +133,60 @@ code {
   background: var(--accent);
   border-color: var(--accent);
   color: white;
+}
+
+.menu-toggle {
+  border-radius: 12px;
+  min-width: 2.5rem;
+  padding: 0.55rem 0.7rem;
+}
+
+.side-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+  z-index: 35;
+}
+
+.side-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.side-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: min(19rem, 88vw);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
+  transform: translateX(-102%);
+  transition: transform 180ms ease;
+  z-index: 40;
+  padding: 1rem;
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+}
+
+.side-nav.open {
+  transform: translateX(0);
+}
+
+.side-nav-links {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.side-nav .nav-link,
+.side-nav .theme-toggle {
+  border-radius: 12px;
 }
 
 .panel {
@@ -192,6 +254,31 @@ textarea.input {
   border-radius: 14px;
   border: 1px solid var(--border);
   background: #000;
+}
+
+.scanner-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: none;
+  place-items: center;
+  z-index: 45;
+  padding: 1rem;
+  box-sizing: border-box;
+}
+
+.scanner-modal.open {
+  display: grid;
+}
+
+.scanner-modal-card {
+  width: min(38rem, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.8rem;
 }
 
 .grid {
@@ -323,8 +410,11 @@ THEME_SCRIPT = """
 
   function applyTheme(theme) {
     document.documentElement.dataset.theme = theme;
-    const toggle = document.getElementById("themeToggle");
-    if (toggle) {
+    const toggles = [document.getElementById("themeToggle"), document.getElementById("themeToggleSide")];
+    for (const toggle of toggles) {
+      if (!toggle) {
+        continue;
+      }
       toggle.textContent = theme === "dark" ? "Light mode" : "Dark mode";
       toggle.setAttribute("aria-label", `Switch to ${theme === "dark" ? "light" : "dark"} mode`);
     }
@@ -336,6 +426,18 @@ THEME_SCRIPT = """
     applyTheme(next);
   }
 
+  function setSideMenuOpen(open) {
+    const sideNav = document.getElementById("sideNav");
+    const sideOverlay = document.getElementById("sideOverlay");
+    const menuToggle = document.getElementById("menuToggle");
+    if (!sideNav || !sideOverlay || !menuToggle) {
+      return;
+    }
+    sideNav.classList.toggle("open", open);
+    sideOverlay.classList.toggle("open", open);
+    menuToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
   applyTheme(preferredTheme());
   window.addEventListener("DOMContentLoaded", () => {
     const toggle = document.getElementById("themeToggle");
@@ -343,6 +445,26 @@ THEME_SCRIPT = """
       applyTheme(document.documentElement.dataset.theme || preferredTheme());
       toggle.addEventListener("click", toggleTheme);
     }
+    const sideToggle = document.getElementById("themeToggleSide");
+    if (sideToggle) {
+      sideToggle.addEventListener("click", toggleTheme);
+    }
+    const menuToggle = document.getElementById("menuToggle");
+    const sideOverlay = document.getElementById("sideOverlay");
+    if (menuToggle) {
+      menuToggle.addEventListener("click", () => {
+        const isOpen = menuToggle.getAttribute("aria-expanded") === "true";
+        setSideMenuOpen(!isOpen);
+      });
+    }
+    if (sideOverlay) {
+      sideOverlay.addEventListener("click", () => setSideMenuOpen(false));
+    }
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        setSideMenuOpen(false);
+      }
+    });
   });
 })();
 """
@@ -534,14 +656,17 @@ SPOOLS_PAGE_SCRIPT = r"""
 
 SCANNER_CORE_SCRIPT = r"""
 function createQrScanner(config) {
+  const triggerButton = document.getElementById(config.triggerButtonId || config.startButtonId);
   const startButton = document.getElementById(config.startButtonId);
   const stopButton = document.getElementById(config.stopButtonId);
   const statusEl = document.getElementById(config.statusId);
   const videoEl = document.getElementById(config.videoId);
   const canvasEl = document.getElementById(config.canvasId);
+  const modalEl = config.modalId ? document.getElementById(config.modalId) : null;
+  const closeButton = config.closeButtonId ? document.getElementById(config.closeButtonId) : null;
   const referenceEl = config.referenceId ? document.getElementById(config.referenceId) : null;
 
-  if (!startButton || !stopButton || !statusEl || !videoEl || !canvasEl) {
+  if (!triggerButton || !startButton || !stopButton || !statusEl || !videoEl || !canvasEl) {
     return;
   }
 
@@ -572,6 +697,13 @@ function createQrScanner(config) {
     videoEl.srcObject = null;
     startButton.disabled = false;
     stopButton.disabled = true;
+  }
+
+  function setModalOpen(open) {
+    if (!modalEl) {
+      return;
+    }
+    modalEl.classList.toggle("open", open);
   }
 
   function handleScanValue(rawValue) {
@@ -729,10 +861,30 @@ function createQrScanner(config) {
   }
 
   startButton.addEventListener("click", startScanner);
+  triggerButton.addEventListener("click", async () => {
+    setModalOpen(true);
+    setStatus("Opening camera...");
+    await startScanner();
+  });
   stopButton.addEventListener("click", () => {
     stopScanner();
     setStatus("Scanner stopped.");
   });
+  if (closeButton) {
+    closeButton.addEventListener("click", () => {
+      stopScanner();
+      setModalOpen(false);
+      setStatus(config.closedStatus || "Scanner closed.");
+    });
+  }
+  if (modalEl) {
+    modalEl.addEventListener("click", (event) => {
+      if (event.target === modalEl) {
+        stopScanner();
+        setModalOpen(false);
+      }
+    });
+  }
 
   if (referenceEl && !referenceEl.value && config.referenceValue) {
     referenceEl.value = config.referenceValue;
@@ -763,11 +915,14 @@ HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
   }
 
   createQrScanner({
-    startButtonId: "startSpoolScanner",
+    triggerButtonId: "startSpoolScanner",
+    startButtonId: "runSpoolScanner",
     stopButtonId: "stopSpoolScanner",
     statusId: "spoolScannerStatus",
     videoId: "spoolScannerVideo",
     canvasId: "spoolScannerCanvas",
+    modalId: "spoolScannerModal",
+    closeButtonId: "closeSpoolScanner",
     referenceId: "spoolScanReference",
     referenceValue: "web+spoolman:s-42",
     prompt: "Point your camera at a Spoolman spool QR code.",
@@ -806,11 +961,14 @@ SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
   }
 
   createQrScanner({
-    startButtonId: "startBinScanner",
+    triggerButtonId: "startBinScanner",
+    startButtonId: "runBinScanner",
     stopButtonId: "stopBinScanner",
     statusId: "scannerStatus",
     videoId: "scannerVideo",
     canvasId: "scannerCanvas",
+    modalId: "binScannerModal",
+    closeButtonId: "closeBinScanner",
     referenceId: "spoolBudBase",
     referenceValue: `${window.location.origin}/bin/`,
     prompt: "Point your camera at a bin QR code.",
@@ -994,15 +1152,22 @@ def render_page(
   <body>
     <div class="shell">
       <header class="topbar">
-        <div class="brand">
-          <a href="/"><strong>SpoolBud</strong></a>
-          <span>Fast QR workflows for Spoolman bins</span>
+        <div class="topbar-left">
+          <button id="menuToggle" class="menu-toggle" type="button" aria-expanded="false" aria-controls="sideNav" aria-label="Open navigation menu">☰</button>
+          <div class="brand">
+            <a href="/"><strong>SpoolBud</strong></a>
+            <span>Fast QR workflows for Spoolman bins</span>
+          </div>
         </div>
-        <nav class="nav" aria-label="Primary">
-          {"".join(nav_links)}
-          <button id="themeToggle" class="theme-toggle" type="button">Dark mode</button>
-        </nav>
+        <button id="themeToggle" class="theme-toggle" type="button">Dark mode</button>
       </header>
+      <div id="sideOverlay" class="side-overlay" aria-hidden="true"></div>
+      <nav id="sideNav" class="side-nav" aria-label="Primary">
+        <div class="side-nav-links">
+          {"".join(nav_links)}
+          <button id="themeToggleSide" class="theme-toggle" type="button">Dark mode</button>
+        </div>
+      </nav>
       {body}
     </div>
     <script>{THEME_SCRIPT}</script>
@@ -1107,16 +1272,24 @@ def home(request: Request) -> HTMLResponse:
         <h2>Scan a Spoolman QR</h2>
         <p class="muted">Start here for the in-browser flow: scan a native Spoolman spool QR such as <code>web+spoolman:s-42</code>, then SpoolBud will open the bin scanner on the next screen.</p>
         <div class="toolbar">
-          <button id="startSpoolScanner" class="button" type="button">Scan spool QR</button>
-          <button id="stopSpoolScanner" class="button" type="button" disabled>Stop scanner</button>
+          <button id="startSpoolScanner" class="button" type="button">Open scanner</button>
         </div>
-        <video id="spoolScannerVideo" class="scanner-video" playsinline muted></video>
-        <canvas id="spoolScannerCanvas" hidden></canvas>
-        <p id="spoolScannerStatus" class="muted">Tap <strong>Scan spool QR</strong> to open the camera.</p>
+        <p id="spoolScannerStatus" class="muted">Tap <strong>Open scanner</strong> to scan a spool QR in a popup.</p>
         <label>
           <div class="muted">Supported spool QR payload example</div>
           <input id="spoolScanReference" class="input" value="" readonly />
         </label>
+      </section>
+      <section id="spoolScannerModal" class="scanner-modal" aria-hidden="true">
+        <div class="scanner-modal-card">
+          <div class="toolbar">
+            <button id="runSpoolScanner" class="button" type="button">Start camera</button>
+            <button id="stopSpoolScanner" class="button" type="button" disabled>Stop scanner</button>
+            <button id="closeSpoolScanner" class="button" type="button">Close</button>
+          </div>
+          <video id="spoolScannerVideo" class="scanner-video" playsinline muted></video>
+          <canvas id="spoolScannerCanvas" hidden></canvas>
+        </div>
       </section>
 
       <section class="panel">
@@ -1174,16 +1347,24 @@ async def scan(request: Request, value: str, stay: str | None = Query(default=No
 
           <section class="panel scanner-wrap">
             <div class="toolbar">
-              <button id="startBinScanner" class="button" type="button">Scan bin QR</button>
-              <button id="stopBinScanner" class="button" type="button" disabled>Stop scanner</button>
+              <button id="startBinScanner" class="button" type="button">Open bin scanner</button>
             </div>
-            <video id="scannerVideo" class="scanner-video" playsinline muted></video>
-            <canvas id="scannerCanvas" hidden></canvas>
-            <p id="scannerStatus" class="muted">Tap <strong>Scan bin QR</strong> to open the camera.</p>
+            <p id="scannerStatus" class="muted">Tap <strong>Open bin scanner</strong> to scan a bin QR in a popup.</p>
             <label>
               <div class="muted">Bin URL prefix (reference)</div>
               <input id="spoolBudBase" class="input" value="" readonly />
             </label>
+          </section>
+          <section id="binScannerModal" class="scanner-modal" aria-hidden="true">
+            <div class="scanner-modal-card">
+              <div class="toolbar">
+                <button id="runBinScanner" class="button" type="button">Start camera</button>
+                <button id="stopBinScanner" class="button" type="button" disabled>Stop scanner</button>
+                <button id="closeBinScanner" class="button" type="button">Close</button>
+              </div>
+              <video id="scannerVideo" class="scanner-video" playsinline muted></video>
+              <canvas id="scannerCanvas" hidden></canvas>
+            </div>
           </section>
         </main>
         <script>{SCAN_PAGE_SCRIPT}</script>
