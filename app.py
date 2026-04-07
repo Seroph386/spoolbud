@@ -13,7 +13,7 @@ API_TOKEN = os.getenv("SPOOLMAN_API_TOKEN", "")
 COOKIE_NAME = os.getenv("COOKIE_NAME", "last_spool_id")
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
-app = FastAPI(title="Filament Ops Helper")
+app = FastAPI(title="SpoolBud Helper")
 
 SPOOL_ID_PATTERNS = [
     r"/spool/(\d+)",
@@ -61,7 +61,7 @@ def home() -> HTMLResponse:
         """
         <html>
           <body style="font-family:sans-serif;max-width:45rem;margin:2rem auto;line-height:1.4;">
-            <h1>Filament Ops Helper</h1>
+            <h1>SpoolBud Helper</h1>
             <p>Scan spool QR first via <code>/scan?value=...</code>, then scan a bin QR via <code>/bin/F-001</code>.</p>
             <ul>
               <li><a href="/status">/status</a> — current selected spool in this browser session</li>

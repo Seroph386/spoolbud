@@ -1,11 +1,11 @@
-# AGENTS.md — Filament Ops Helper Guidance
+# AGENTS.md — SpoolBud Helper Guidance
 
 This file provides guiding principles for AI/code agents extending this repository.
 Its scope is the entire repo.
 
 ## Product intent
 
-Filament Ops is a minimal companion service for Spoolman with a two-scan workflow:
+SpoolBud is a minimal companion service for Spoolman with a two-scan workflow:
 1. **Spool scan** selects a spool (`/scan`), stores selection in a cookie, and redirects to Spoolman.
 2. **Bin scan** updates location (`/bin/{location}`) for the selected spool.
 
@@ -73,7 +73,7 @@ At minimum, maintain or improve coverage for:
 When feasible, run locally:
 - `pytest -q`
 - `docker compose config -q`
-- `docker build -t filament-ops:test .`
+- `docker build -t spoolbud:test .`
 
 ## Non-goals (unless explicitly requested)
 

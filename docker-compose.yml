@@ -1,9 +1,9 @@
 version: "3.9"
 
 services:
-  filament-ops:
+  spoolbud:
     build: .
-    container_name: filament-ops
+    container_name: spoolbud
     restart: unless-stopped
     environment:
       SPOOLMAN_BASE: "https://filament.igetno.net"

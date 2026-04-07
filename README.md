@@ -1,4 +1,4 @@
-# filament-ops helper service
+# spoolbud helper service
 
 A small FastAPI companion service for Spoolman that supports a two-scan workflow:
 
@@ -49,7 +49,7 @@ Service is available at <http://localhost:8010>.
 ### Recommended spool QR format
 
 ```text
-https://filament-ops.example.net/scan?value=https://filament.example.net/spool/42
+https://spoolbud.example.net/scan?value=https://filament.example.net/spool/42
 ```
 
 (Also supports numeric-only IDs such as `?value=42`.)
@@ -57,16 +57,16 @@ https://filament-ops.example.net/scan?value=https://filament.example.net/spool/4
 ### Bin QR format
 
 ```text
-https://filament-ops.example.net/bin/F-001
-https://filament-ops.example.net/bin/B-004
+https://spoolbud.example.net/bin/F-001
+https://spoolbud.example.net/bin/B-004
 ```
 
 ## CI/CD
 
 - CI workflow (`.github/workflows/ci.yml`) runs unit tests, validates Docker Compose, builds the image, and smoke-tests `/healthz`.
 - Publish workflow (`.github/workflows/publish.yml`) runs on pushes to `main` and pushes to GHCR:
-  - `ghcr.io/<owner>/filament-ops:latest`
-  - `ghcr.io/<owner>/filament-ops:sha-<shortsha>`
+  - `ghcr.io/<owner>/spoolbud:latest`
+  - `ghcr.io/<owner>/spoolbud:sha-<shortsha>`
 
 ## Agent guidance
 
