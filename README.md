@@ -75,9 +75,15 @@ https://spoolbud.example.net/bin/B-004
 ## CI/CD
 
 - CI workflow (`.github/workflows/ci.yml`) runs unit tests, validates Docker Compose, builds the image, and smoke-tests `/healthz`.
-- Publish workflow (`.github/workflows/publish.yml`) runs on pushes to `main` and pushes to GHCR:
+- Publish workflow (`.github/workflows/publish.yml`) runs on pushes to `main` and pushes a **multi-arch** image to GHCR (`linux/amd64` + `linux/arm64`):
   - `ghcr.io/<owner>/spoolbud:latest`
   - `ghcr.io/<owner>/spoolbud:sha-<shortsha>`
+
+If you need to force a platform when pulling/testing locally:
+
+```bash
+docker pull --platform linux/arm64 ghcr.io/<owner>/spoolbud:latest
+```
 
 ## Agent guidance
 
