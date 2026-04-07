@@ -1,3 +1,4 @@
+import httpx
 from fastapi.testclient import TestClient
 
 import app as spoolbud_app
@@ -8,6 +9,7 @@ def create_client() -> TestClient:
 
 
 def test_extract_spool_id_variants():
+    assert spoolbud_app.extract_spool_id("web+spoolman:s-42") == 42
     assert spoolbud_app.extract_spool_id("https://filament.igetno.net/spool/show/42") == 42
     assert spoolbud_app.extract_spool_id("https://filament.igetno.net/spool/42") == 42
     assert spoolbud_app.extract_spool_id("https://x.test/thing?spool_id=7") == 7
@@ -23,18 +25,57 @@ def test_scan_sets_cookie_and_redirects():
     assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
 
 
-def test_scan_stay_sets_cookie_and_shows_scanner_page():
+def test_scan_stay_sets_cookie_and_shows_scanner_page(monkeypatch):
+    async def fake_fetch(spool_id: int):
+        assert spool_id == 42
+        return {"id": 42, "name": "Orange PETG"}
+
+    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spool", fake_fetch)
+
+    with create_client() as client:
+        resp = client.get(
+            "/scan",
+            params={"value": "web+spoolman:s-42", "stay": "1"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 200
+    assert "Spool 42 selected" in resp.text
+    assert "Orange PETG" in resp.text
+    assert "Scan bin QR" in resp.text
+    assert "scannerVideo" in resp.text
+    assert "scannerCanvas" in resp.text
+    assert "Compatibility scanner is active for this browser." in resp.text
+    assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
+
+
+def test_scan_stay_survives_spoolman_lookup_failure(monkeypatch):
+    async def fake_fetch(spool_id: int):
+        assert spool_id == 42
+        raise httpx.HTTPError("boom")
+
+    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spool", fake_fetch)
+
     with create_client() as client:
         resp = client.get(
             "/scan",
             params={"value": "https://filament.igetno.net/spool/42", "stay": "1"},
             follow_redirects=False,
         )
+
     assert resp.status_code == 200
     assert "Spool 42 selected" in resp.text
-    assert "Scan bin QR" in resp.text
-    assert "scannerVideo" in resp.text
-    assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
+    assert "could not load its details from Spoolman right now" in resp.text
+
+
+def test_home_page_exposes_spool_scanner():
+    with create_client() as client:
+        resp = client.get("/")
+
+    assert resp.status_code == 200
+    assert "Scan a Spoolman QR" in resp.text
+    assert "startSpoolScanner" in resp.text
+    assert "spoolScannerVideo" in resp.text
+    assert "web+spoolman:s-42" in resp.text
 
 
 def test_bin_without_cookie_shows_bin_contents(monkeypatch):

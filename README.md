@@ -2,8 +2,11 @@
 
 A small FastAPI companion service for Spoolman that supports a two-scan workflow:
 
-1. Scan a spool QR code (`/scan?value=...`) to select a spool and redirect to Spoolman.
+1. Open SpoolBud and scan a spool QR code to select a spool.
+   - The homepage can scan native Spoolman spool QR payloads such as `web+spoolman:s-42` and opens the bin scanner automatically.
+   - Direct links to `GET /scan?value=...` still work for URL-based or numeric spool QR formats.
    - Optional: use `/scan?value=...&stay=1` to keep the phone in SpoolBud and launch an in-page bin QR scanner button (no extra browser tabs/windows).
+   - The in-page scanner prefers the browser's native `BarcodeDetector` and automatically falls back to a compatibility QR decoder for WebKit-based browsers such as Chrome on iPhone.
 2. Scan a bin QR code (`/bin/F-001`) to move the selected spool to that location, clear the active spool selection cookie, and redirect back to that spool in Spoolman.
 3. If a bin is scanned without an active spool selection, SpoolBud shows the current contents of that bin from Spoolman instead of failing.
 
@@ -18,7 +21,8 @@ This service solves that by routing spool scans through `/scan`, storing the sel
 
 - `GET /healthz` — health probe
 - `GET /status` — current selected spool for this browser session
-- `GET /scan?value=<spool_url_or_id>[&stay=1]` — parse spool ID, set cookie, then either redirect to Spoolman (default) or stay in SpoolBud with an in-page bin scanner
+- `GET /scan?value=<spool_url_or_id_or_spoolman_payload>[&stay=1]` — parse spool ID, set cookie, then either redirect to Spoolman (default) or stay in SpoolBud with an in-page bin scanner
+  - When `stay=1` is used, the selected-spool page also shows the spool name/details returned by Spoolman when available.
 - `GET /select/{spool_id}` — manual fallback spool selection (for old direct Spoolman QR labels)
 - `GET /bin/{location}` — update selected spool location in Spoolman and redirect to the spool page, or show current bin contents if no spool is selected
 - `GET /bins` — interactive QR label page for bin labels
@@ -74,14 +78,18 @@ Open <http://localhost:8010/spools> to generate spool QR labels in Spoolman's sc
 ### Recommended spool QR format
 
 ```text
-https://spoolbud.example.net/scan?value=https://filament.example.net/spool/show/42
+web+spoolman:s-42
 ```
 
-To keep scanning in one page instead of opening Spoolman after every spool scan:
+Open SpoolBud, tap `Scan spool QR`, and scan that payload to stay in the helper flow.
+
+Direct SpoolBud links are still supported when you want a QR code to jump straight into the helper:
 
 ```text
 https://spoolbud.example.net/scan?value=https://filament.example.net/spool/show/42&stay=1
 ```
+
+(On iPhone browsers, `stay=1` now uses a compatibility scanner automatically when native barcode detection is unavailable.)
 
 (Also supports numeric-only IDs such as `?value=42`.)
 
