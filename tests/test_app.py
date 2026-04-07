@@ -2,7 +2,9 @@ from fastapi.testclient import TestClient
 
 import app as spoolbud_app
 
-client = TestClient(spoolbud_app.app)
+
+def create_client() -> TestClient:
+    return TestClient(spoolbud_app.app)
 
 
 def test_extract_spool_id_variants():
@@ -13,20 +15,24 @@ def test_extract_spool_id_variants():
 
 
 def test_scan_sets_cookie_and_redirects():
-    resp = client.get("/scan", params={"value": "https://filament.igetno.net/spool/42"}, follow_redirects=False)
+    with create_client() as client:
+        resp = client.get("/scan", params={"value": "https://filament.igetno.net/spool/42"}, follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"].endswith("/spool/42")
     assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
 
 
 def test_bin_without_cookie_errors():
-    resp = client.get("/bin/F-001")
+    with create_client() as client:
+        resp = client.get("/bin/F-001")
     assert resp.status_code == 400
     assert "No active spool selected" in resp.text
 
 
 def test_status_reads_cookie():
-    resp = client.get("/status", cookies={spoolbud_app.COOKIE_NAME: "42"})
+    with create_client() as client:
+        client.cookies.set(spoolbud_app.COOKIE_NAME, "42")
+        resp = client.get("/status")
     assert resp.status_code == 200
     body = resp.json()
     assert body["selected_spool_id"] == 42
@@ -34,7 +40,8 @@ def test_status_reads_cookie():
 
 
 def test_api_bins_default():
-    resp = client.get("/api/bins")
+    with create_client() as client:
+        resp = client.get("/api/bins")
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["source"] == "default"
@@ -43,13 +50,15 @@ def test_api_bins_default():
 
 
 def test_qr_svg_endpoint():
-    resp = client.get("/qr.svg", params={"value": "https://spoolbud.example.net/bin/F-001"})
+    with create_client() as client:
+        resp = client.get("/qr.svg", params={"value": "https://spoolbud.example.net/bin/F-001"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("image/svg+xml")
     assert b"<svg" in resp.content
 
 
 def test_bins_page_renders():
-    resp = client.get("/bins")
+    with create_client() as client:
+        resp = client.get("/bins")
     assert resp.status_code == 200
     assert "Bin QR Generator" in resp.text
