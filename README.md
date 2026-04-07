@@ -22,8 +22,9 @@ This service solves that by routing spool scans through `/scan`, storing the sel
 - `GET /select/{spool_id}` — manual fallback spool selection (for old direct Spoolman QR labels)
 - `GET /bin/{location}` — update selected spool location in Spoolman and redirect to the spool page, or show current bin contents if no spool is selected
 - `GET /bins` — interactive QR label page for bin labels
-- `GET /spools` — interactive QR label page for Spoolman-compatible spool labels
+- `GET /spools` — interactive QR label page for Spoolman-compatible payloads or full SpoolBud `/scan` URLs
 - `GET /api/bins?source=default|spoolman` — fetch bin list from defaults or by scraping locations from Spoolman
+- `GET /api/spools` — fetch spool IDs from Spoolman for the spool label generator
 - `GET /qr.svg?value=<url_or_text>` — render QR code SVG for labels
 
 ## Environment variables
@@ -64,7 +65,8 @@ Open <http://localhost:8010/bins> to:
 Open <http://localhost:8010/spools> to generate spool QR labels in Spoolman's scanner format:
 
 - accepts raw spool IDs plus Spoolman spool URLs pasted one per line
-- renders QR payloads like `web+spoolman:s-42`
+- can pull spool IDs directly from Spoolman with one tap
+- renders either QR payloads like `web+spoolman:s-42` **or** full SpoolBud links like `/scan?...&stay=1`
 - gives you a matching SpoolBud `/select/<spool_id>` link under each label for manual fallback
 
 ## QR formats
