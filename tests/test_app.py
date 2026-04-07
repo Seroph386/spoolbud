@@ -23,6 +23,20 @@ def test_scan_sets_cookie_and_redirects():
     assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
 
 
+def test_scan_stay_sets_cookie_and_shows_scanner_page():
+    with create_client() as client:
+        resp = client.get(
+            "/scan",
+            params={"value": "https://filament.igetno.net/spool/42", "stay": "1"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 200
+    assert "Spool 42 selected" in resp.text
+    assert "Scan bin QR" in resp.text
+    assert "scannerVideo" in resp.text
+    assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
+
+
 def test_bin_without_cookie_shows_bin_contents(monkeypatch):
     async def fake_fetch(location: str):
         assert location == "F-001"
