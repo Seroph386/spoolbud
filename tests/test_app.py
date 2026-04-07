@@ -41,7 +41,7 @@ def test_scan_stay_sets_cookie_and_shows_scanner_page(monkeypatch):
     assert resp.status_code == 200
     assert "Spool 42 selected" in resp.text
     assert "Orange PETG" in resp.text
-    assert "Scan bin QR" in resp.text
+    assert "Open bin scanner" in resp.text
     assert "scannerVideo" in resp.text
     assert "scannerCanvas" in resp.text
     assert "Compatibility scanner is active for this browser." in resp.text
