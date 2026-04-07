@@ -23,6 +23,20 @@ def test_scan_sets_cookie_and_redirects():
     assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
 
 
+def test_scan_stay_sets_cookie_and_shows_scanner_page():
+    with create_client() as client:
+        resp = client.get(
+            "/scan",
+            params={"value": "https://filament.igetno.net/spool/42", "stay": "1"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 200
+    assert "Spool 42 selected" in resp.text
+    assert "Scan bin QR" in resp.text
+    assert "scannerVideo" in resp.text
+    assert spoolbud_app.COOKIE_NAME in resp.headers.get("set-cookie", "")
+
+
 def test_bin_without_cookie_shows_bin_contents(monkeypatch):
     async def fake_fetch(location: str):
         assert location == "F-001"
@@ -104,6 +118,20 @@ def test_api_bins_default():
     assert "B-004" in payload["bins"]
 
 
+def test_api_spools(monkeypatch):
+    async def fake_fetch():
+        return [{"id": 9}, {"id": 1}, {"id": 9}, {"id": "bad"}]
+
+    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spools", fake_fetch)
+
+    with create_client() as client:
+        resp = client.get("/api/spools")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["source"] == "spoolman"
+    assert payload["spool_ids"] == [1, 9]
+
+
 def test_qr_svg_endpoint():
     with create_client() as client:
         resp = client.get("/qr.svg", params={"value": "https://spoolbud.example.net/bin/F-001"})
@@ -127,5 +155,7 @@ def test_spools_page_renders():
         resp = client.get("/spools")
     assert resp.status_code == 200
     assert "Spoolman-Compatible Spool QR Labels" in resp.text
-    assert "web+spoolman:s-" in resp.text
+    assert "loadSpoolmanSpools" in resp.text
+    assert "includeStayFlag" in resp.text
+    assert "Full SpoolBud /scan URL" in resp.text
     assert "renderSpools" in resp.text

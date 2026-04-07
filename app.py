@@ -180,6 +180,19 @@ textarea.input {
   resize: vertical;
 }
 
+.scanner-wrap {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.scanner-video {
+  width: 100%;
+  max-width: 26rem;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -410,9 +423,18 @@ SPOOLS_PAGE_SCRIPT = r"""
   const gridEl = document.getElementById("spoolGrid");
   const renderButton = document.getElementById("renderSpools");
   const loadSampleButton = document.getElementById("loadSpoolSample");
+  const loadSpoolmanButton = document.getElementById("loadSpoolmanSpools");
+  const formatEl = document.getElementById("spoolQrFormat");
+  const publicBaseEl = document.getElementById("spoolPublicBase");
+  const includeStayEl = document.getElementById("includeStayFlag");
+  const spoolmanBaseEl = document.getElementById("spoolmanBase");
 
-  if (!spoolInputEl || !statusEl || !gridEl || !renderButton || !loadSampleButton) {
+  if (!spoolInputEl || !statusEl || !gridEl || !renderButton || !loadSampleButton || !loadSpoolmanButton || !formatEl || !publicBaseEl || !includeStayEl || !spoolmanBaseEl) {
     return;
+  }
+
+  if (!publicBaseEl.value) {
+    publicBaseEl.value = window.location.origin;
   }
 
   function parseSpoolId(value) {
@@ -432,11 +454,31 @@ SPOOLS_PAGE_SCRIPT = r"""
     return null;
   }
 
+  async function loadSpoolsFromSpoolman() {
+    statusEl.textContent = "Loading spool IDs from Spoolman...";
+    try {
+      const response = await fetch("/api/spools");
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Request failed");
+      }
+      spoolInputEl.value = data.spool_ids.join("\n");
+      statusEl.textContent = `Loaded ${data.spool_ids.length} spool IDs from Spoolman.`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      statusEl.textContent = `Failed to load spools: ${message}`;
+    }
+  }
+
   function renderSpools() {
     const lines = spoolInputEl.value
       .split("\n")
       .map((value) => value.trim())
       .filter(Boolean);
+
+    const format = formatEl.value;
+    const publicBase = publicBaseEl.value.trim().replace(/\/$/, "");
+    const includeStayFlag = Boolean(includeStayEl.checked);
 
     gridEl.innerHTML = "";
 
@@ -446,7 +488,22 @@ SPOOLS_PAGE_SCRIPT = r"""
         continue;
       }
 
-      const qrValue = `web+spoolman:s-${spoolId}`;
+      const spoolmanUrl = `/spool/show/${spoolId}`;
+      let qrValue = `web+spoolman:s-${spoolId}`;
+
+      if (format === "full-url") {
+        if (!publicBase) {
+          statusEl.textContent = "Enter a public SpoolBud base URL first.";
+          return;
+        }
+        const spoolmanBase = spoolmanBaseEl.value.trim().replace(/\/$/, "");
+        const spoolValue = `${spoolmanBase}${spoolmanUrl}`;
+        qrValue = `${publicBase}/scan?value=${encodeURIComponent(spoolValue)}`;
+        if (includeStayFlag) {
+          qrValue += "&stay=1";
+        }
+      }
+
       const qrSrc = `/qr.svg?value=${encodeURIComponent(qrValue)}`;
       const spoolUrl = `${window.location.origin}/select/${encodeURIComponent(spoolId)}`;
       const card = document.createElement("article");
@@ -454,22 +511,130 @@ SPOOLS_PAGE_SCRIPT = r"""
       card.innerHTML = `
         <h3>Spool ${spoolId}</h3>
         <img alt="QR for spool ${spoolId}" src="${qrSrc}" />
-        <div class="muted">${qrValue}</div>
+        <div class="muted"><code>${qrValue}</code></div>
         <div class="muted"><a href="${spoolUrl}">Select in SpoolBud</a></div>
       `;
       gridEl.appendChild(card);
     }
 
-    statusEl.textContent = `Rendered ${gridEl.children.length} Spoolman-compatible spool QR labels.`;
+    statusEl.textContent = `Rendered ${gridEl.children.length} spool QR labels.`;
   }
 
   loadSampleButton.addEventListener("click", () => {
     spoolInputEl.value = "1\n2\n3";
     renderSpools();
   });
+  loadSpoolmanButton.addEventListener("click", loadSpoolsFromSpoolman);
   renderButton.addEventListener("click", renderSpools);
 })();
 """
+
+
+SCAN_PAGE_SCRIPT = r"""
+(() => {
+  const startButton = document.getElementById("startBinScanner");
+  const stopButton = document.getElementById("stopBinScanner");
+  const statusEl = document.getElementById("scannerStatus");
+  const videoEl = document.getElementById("scannerVideo");
+  const spoolBudBaseEl = document.getElementById("spoolBudBase");
+
+  if (!startButton || !stopButton || !statusEl || !videoEl || !spoolBudBaseEl) {
+    return;
+  }
+
+  let stream = null;
+  let timer = null;
+  let detector = null;
+
+  function stopScanner() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      stream = null;
+    }
+    videoEl.srcObject = null;
+    startButton.disabled = false;
+    stopButton.disabled = true;
+  }
+
+  function toBinUrl(rawValue) {
+    const value = String(rawValue || "").trim();
+    const directMatch = value.match(/\/bin\/([^\/?#]+)/i);
+    if (directMatch) {
+      return `/bin/${encodeURIComponent(directMatch[1])}`;
+    }
+
+    const cleaned = value.toUpperCase().replace(/\s+/g, "");
+    if (/^[A-Z]-\d{3}$/.test(cleaned)) {
+      return `/bin/${encodeURIComponent(cleaned)}`;
+    }
+    return null;
+  }
+
+  async function checkFrame() {
+    if (!detector || !videoEl.videoWidth || !videoEl.videoHeight) {
+      return;
+    }
+    try {
+      const codes = await detector.detect(videoEl);
+      for (const code of codes) {
+        const target = toBinUrl(code.rawValue);
+        if (target) {
+          statusEl.textContent = `Scanned ${code.rawValue}. Updating location...`;
+          stopScanner();
+          window.location.href = target;
+          return;
+        }
+      }
+    } catch (error) {
+      statusEl.textContent = "Scanner could not read that frame yet. Keep the QR in view.";
+    }
+  }
+
+  async function startScanner() {
+    if (!("BarcodeDetector" in window)) {
+      statusEl.textContent = "This browser does not support BarcodeDetector yet. Use a browser like recent Chrome on mobile.";
+      return;
+    }
+
+    try {
+      detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      videoEl.srcObject = stream;
+      await videoEl.play();
+      timer = window.setInterval(checkFrame, 350);
+      statusEl.textContent = "Point your camera at a bin QR code.";
+      startButton.disabled = true;
+      stopButton.disabled = false;
+    } catch (error) {
+      statusEl.textContent = "Camera access failed. Check browser camera permissions.";
+      stopScanner();
+    }
+  }
+
+  startButton.addEventListener("click", startScanner);
+  stopButton.addEventListener("click", () => {
+    stopScanner();
+    statusEl.textContent = "Scanner stopped.";
+  });
+
+  const directBinBase = `${window.location.origin}/bin/`;
+  if (!spoolBudBaseEl.value) {
+    spoolBudBaseEl.value = directBinBase;
+  }
+})();
+"""
+
+
+def wants_scan_stay(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def extract_spool_id(value: str | None) -> int | None:
@@ -732,12 +897,39 @@ def healthz() -> dict[str, object]:
 
 
 @app.get("/scan")
-def scan(value: str):
+def scan(request: Request, value: str, stay: str | None = Query(default=None)):
     spool_id = extract_spool_id(value)
     if spool_id is None:
         raise HTTPException(status_code=400, detail="Could not parse spool ID from QR value")
 
-    response = RedirectResponse(url=spool_url(spool_id), status_code=302)
+    if wants_scan_stay(stay):
+        body = f"""
+        <main class="stack">
+          <section class="panel">
+            <h1>Spool {spool_id} selected</h1>
+            <p class="muted">You can stay in SpoolBud and scan a bin QR directly from this page.</p>
+            <p><a href="{escape(spool_url(spool_id), quote=True)}" target="_blank" rel="noreferrer">Open this spool in Spoolman</a></p>
+          </section>
+
+          <section class="panel scanner-wrap">
+            <div class="toolbar">
+              <button id="startBinScanner" class="button" type="button">Scan bin QR</button>
+              <button id="stopBinScanner" class="button" type="button" disabled>Stop scanner</button>
+            </div>
+            <video id="scannerVideo" class="scanner-video" playsinline muted></video>
+            <p id="scannerStatus" class="muted">Tap <strong>Scan bin QR</strong> to open the camera.</p>
+            <label>
+              <div class="muted">Bin URL prefix (reference)</div>
+              <input id="spoolBudBase" class="input" value="" readonly />
+            </label>
+          </section>
+        </main>
+        <script>{SCAN_PAGE_SCRIPT}</script>
+        """
+        response = render_page("Spool Selected", body, request=request)
+    else:
+        response = RedirectResponse(url=spool_url(spool_id), status_code=302)
+
     response.set_cookie(COOKIE_NAME, str(spool_id), max_age=COOKIE_MAX_AGE, samesite="Lax")
     return response
 
@@ -828,6 +1020,18 @@ async def api_bins(source: str = Query(default="default", pattern="^(default|spo
     return {"source": "default", "bins": default_bins()}
 
 
+
+
+@app.get("/api/spools", response_class=JSONResponse)
+async def api_spools():
+    try:
+        spools = await fetch_spoolman_spools()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to load spools from Spoolman: {exc}") from exc
+
+    spool_ids = sorted({spool.get("id") for spool in spools if isinstance(spool.get("id"), int)})
+    return {"source": "spoolman", "spool_ids": spool_ids}
+
 @app.get("/qr.svg")
 def qr_svg(value: str = Query(min_length=1, max_length=2048)) -> Response:
     qr = segno.make(value)
@@ -872,7 +1076,7 @@ def bins_page(request: Request) -> HTMLResponse:
 
 @app.get("/spools", response_class=HTMLResponse)
 def spools_page(request: Request) -> HTMLResponse:
-    body = """
+    body = f"""
     <main class="stack">
       <section class="panel">
         <h1>Spoolman-Compatible Spool QR Labels</h1>
@@ -882,8 +1086,28 @@ def spools_page(request: Request) -> HTMLResponse:
       <section class="panel stack">
         <div class="toolbar">
           <button id="loadSpoolSample" class="button" type="button">Load sample IDs</button>
+          <button id="loadSpoolmanSpools" class="button" type="button">Load from Spoolman</button>
           <button id="renderSpools" class="button" type="button">Render spool labels</button>
         </div>
+
+        <label style="max-width: 24rem;">
+          <div class="muted">QR format</div>
+          <select id="spoolQrFormat" class="input">
+            <option value="spoolman">Spoolman scanner payload (web+spoolman)</option>
+            <option value="full-url">Full SpoolBud /scan URL</option>
+          </select>
+        </label>
+
+        <label>
+          <div class="muted">Public SpoolBud base URL (for full URL format)</div>
+          <input id="spoolPublicBase" class="input" value="" />
+        </label>
+
+        <label>
+          <input id="includeStayFlag" type="checkbox" checked /> Include <code>&amp;stay=1</code> in full URL QR labels
+        </label>
+
+        <input id="spoolmanBase" type="hidden" value="{escape(SPOOLMAN_BASE, quote=True)}" />
 
         <label>
           <div class="muted">Spool IDs or Spoolman spool URLs, one per line</div>
@@ -894,6 +1118,6 @@ def spools_page(request: Request) -> HTMLResponse:
         <div id="spoolGrid" class="grid"></div>
       </section>
     </main>
-    <script>{script}</script>
+    <script>{{script}}</script>
     """.replace("{script}", SPOOLS_PAGE_SCRIPT)
     return render_page("Spool Labels", body, request=request, active_nav="spools")
