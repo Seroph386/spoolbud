@@ -31,3 +31,25 @@ def test_status_reads_cookie():
     body = resp.json()
     assert body["selected_spool_id"] == 42
     assert body["selected_spool_url"].endswith("/spool/42")
+
+
+def test_api_bins_default():
+    resp = client.get("/api/bins")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["source"] == "default"
+    assert "F-001" in payload["bins"]
+    assert "B-004" in payload["bins"]
+
+
+def test_qr_svg_endpoint():
+    resp = client.get("/qr.svg", params={"value": "https://spoolbud.example.net/bin/F-001"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/svg+xml")
+    assert b"<svg" in resp.content
+
+
+def test_bins_page_renders():
+    resp = client.get("/bins")
+    assert resp.status_code == 200
+    assert "Bin QR Generator" in resp.text

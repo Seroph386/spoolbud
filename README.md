@@ -19,6 +19,9 @@ This service solves that by routing spool scans through `/scan`, storing the sel
 - `GET /scan?value=<spool_url_or_id>` — parse spool ID, set cookie, redirect to Spoolman spool page
 - `GET /select/{spool_id}` — manual fallback spool selection (for old direct Spoolman QR labels)
 - `GET /bin/{location}` — update selected spool location in Spoolman
+- `GET /bins` — interactive QR label page for bin labels
+- `GET /api/bins?source=default|spoolman` — fetch bin list from defaults or by scraping locations from Spoolman
+- `GET /qr.svg?value=<url_or_text>` — render QR code SVG for labels
 
 ## Environment variables
 
@@ -43,6 +46,14 @@ docker compose up --build
 ```
 
 Service is available at <http://localhost:8010>.
+
+## Bin QR label generator
+
+Open <http://localhost:8010/bins> to:
+
+- load default bins (`F-001..F-020` and `B-001..B-004`)
+- scrape currently used location names from the configured Spoolman instance
+- render printable QR labels that point to `https://<your-spoolbud-host>/bin/<location>`
 
 ## QR formats
 

@@ -8,6 +8,7 @@ Its scope is the entire repo.
 SpoolBud is a minimal companion service for Spoolman with a two-scan workflow:
 1. **Spool scan** selects a spool (`/scan`), stores selection in a cookie, and redirects to Spoolman.
 2. **Bin scan** updates location (`/bin/{location}`) for the selected spool.
+3. **Label generation** can be done via `/bins` and `/qr.svg` (optionally sourced from Spoolman via `/api/bins?source=spoolman`).
 
 Design for low-friction phone use with stable QR labels and simple operational deployment.
 
