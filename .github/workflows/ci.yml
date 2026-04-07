@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: pytest -q
+
+      - name: Validate Docker Compose
+        run: docker compose config -q
+
+      - name: Build Docker image
+        run: docker build -t spoolbud:ci .
+
+      - name: Smoke test container health endpoint
+        run: |
+          docker run -d --name spoolbud-ci -p 18080:8000 spoolbud:ci
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:18080/healthz > /dev/null; then
+              echo "Container responded successfully"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Container did not become ready in time" >&2
+          docker logs spoolbud-ci || true
+          exit 1
+
+      - name: Cleanup test container
+        if: always()
+        run: docker rm -f spoolbud-ci || true
