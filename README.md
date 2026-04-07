@@ -67,3 +67,7 @@ https://filament-ops.example.net/bin/B-004
 - Publish workflow (`.github/workflows/publish.yml`) runs on pushes to `main` and pushes to GHCR:
   - `ghcr.io/<owner>/filament-ops:latest`
   - `ghcr.io/<owner>/filament-ops:sha-<shortsha>`
+
+## Agent guidance
+
+Repository-level AI agent guidance lives in `AGENTS.md` (principles, architecture constraints, and extension expectations).
