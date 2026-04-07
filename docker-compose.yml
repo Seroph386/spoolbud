@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  filament-ops:
+    build: .
+    container_name: filament-ops
+    restart: unless-stopped
+    environment:
+      SPOOLMAN_BASE: "https://filament.igetno.net"
+      SPOOLMAN_API_TOKEN: "${SPOOLMAN_API_TOKEN}"
+      COOKIE_NAME: "last_spool_id"
+    ports:
+      - "8010:8000"
