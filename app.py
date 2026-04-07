@@ -19,6 +19,7 @@ COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 app = FastAPI(title="SpoolBud Helper")
 
 SPOOL_ID_PATTERNS = [
+    r"(?i)web\+spoolman:s-(\d+)",
     r"/spool/show/(\d+)",
     r"/spool/(\d+)",
     r"[?&]spool_id=(\d+)",
@@ -440,6 +441,7 @@ SPOOLS_PAGE_SCRIPT = r"""
   function parseSpoolId(value) {
     const trimmed = value.trim();
     const patterns = [
+      /web\+spoolman:s-(\d+)/i,
       /\/spool\/show\/(\d+)/,
       /\/spool\/(\d+)/,
       /[?&]spool_id=(\d+)/,
@@ -530,21 +532,29 @@ SPOOLS_PAGE_SCRIPT = r"""
 """
 
 
-SCAN_PAGE_SCRIPT = r"""
-(() => {
-  const startButton = document.getElementById("startBinScanner");
-  const stopButton = document.getElementById("stopBinScanner");
-  const statusEl = document.getElementById("scannerStatus");
-  const videoEl = document.getElementById("scannerVideo");
-  const spoolBudBaseEl = document.getElementById("spoolBudBase");
+SCANNER_CORE_SCRIPT = r"""
+function createQrScanner(config) {
+  const startButton = document.getElementById(config.startButtonId);
+  const stopButton = document.getElementById(config.stopButtonId);
+  const statusEl = document.getElementById(config.statusId);
+  const videoEl = document.getElementById(config.videoId);
+  const canvasEl = document.getElementById(config.canvasId);
+  const referenceEl = config.referenceId ? document.getElementById(config.referenceId) : null;
 
-  if (!startButton || !stopButton || !statusEl || !videoEl || !spoolBudBaseEl) {
+  if (!startButton || !stopButton || !statusEl || !videoEl || !canvasEl) {
     return;
   }
 
   let stream = null;
   let timer = null;
   let detector = null;
+  let scanMode = null;
+  let jsQrLoadPromise = null;
+  let canvasContext = null;
+
+  function setStatus(message) {
+    statusEl.textContent = message;
+  }
 
   function stopScanner() {
     if (timer) {
@@ -557,11 +567,230 @@ SCAN_PAGE_SCRIPT = r"""
       }
       stream = null;
     }
+    detector = null;
+    scanMode = null;
     videoEl.srcObject = null;
     startButton.disabled = false;
     stopButton.disabled = true;
   }
 
+  function handleScanValue(rawValue) {
+    const result = config.handleValue(String(rawValue || "").trim());
+    if (!result || !result.url) {
+      return false;
+    }
+
+    setStatus(result.status || `Scanned ${rawValue}. Opening next step...`);
+    stopScanner();
+    window.location.href = result.url;
+    return true;
+  }
+
+  async function loadCompatibilityScanner() {
+    if (typeof window.jsQR === "function") {
+      return window.jsQR;
+    }
+
+    if (!jsQrLoadPromise) {
+      jsQrLoadPromise = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+        script.async = true;
+        script.onload = () => {
+          if (typeof window.jsQR === "function") {
+            resolve(window.jsQR);
+            return;
+          }
+          reject(new Error("compat-load-failed"));
+        };
+        script.onerror = () => reject(new Error("compat-load-failed"));
+        document.head.appendChild(script);
+      }).catch((error) => {
+        jsQrLoadPromise = null;
+        throw error;
+      });
+    }
+
+    return jsQrLoadPromise;
+  }
+
+  async function chooseScannerMode() {
+    if ("BarcodeDetector" in window) {
+      try {
+        detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        return "barcode-detector";
+      } catch (error) {
+        detector = null;
+      }
+    }
+
+    setStatus("Loading compatibility scanner for this browser...");
+    await loadCompatibilityScanner();
+    return "jsqr";
+  }
+
+  async function openCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("camera-unsupported");
+    }
+
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: "environment" } },
+      });
+    } catch (error) {
+      return navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+    }
+  }
+
+  async function detectWithBarcodeDetector() {
+    if (!detector || !videoEl.videoWidth || !videoEl.videoHeight) {
+      return;
+    }
+
+    const codes = await detector.detect(videoEl);
+    for (const code of codes) {
+      if (handleScanValue(code.rawValue)) {
+        return;
+      }
+    }
+  }
+
+  async function detectWithJsQr() {
+    if (typeof window.jsQR !== "function" || !videoEl.videoWidth || !videoEl.videoHeight) {
+      return;
+    }
+
+    if (!canvasContext) {
+      canvasContext = canvasEl.getContext("2d", { willReadFrequently: true });
+    }
+    if (!canvasContext) {
+      throw new Error("compat-canvas-failed");
+    }
+
+    const width = videoEl.videoWidth;
+    const height = videoEl.videoHeight;
+    if (canvasEl.width !== width) {
+      canvasEl.width = width;
+    }
+    if (canvasEl.height !== height) {
+      canvasEl.height = height;
+    }
+
+    canvasContext.drawImage(videoEl, 0, 0, width, height);
+    const image = canvasContext.getImageData(0, 0, width, height);
+    const code = window.jsQR(image.data, width, height, { inversionAttempts: "attemptBoth" });
+    if (code) {
+      handleScanValue(code.data);
+    }
+  }
+
+  async function checkFrame() {
+    if (!scanMode || !videoEl.videoWidth || !videoEl.videoHeight) {
+      return;
+    }
+
+    try {
+      if (scanMode === "barcode-detector") {
+        await detectWithBarcodeDetector();
+      } else if (scanMode === "jsqr") {
+        await detectWithJsQr();
+      }
+    } catch (error) {
+      setStatus(config.readFailureMessage);
+    }
+  }
+
+  async function startScanner() {
+    try {
+      scanMode = await chooseScannerMode();
+      stream = await openCamera();
+      videoEl.srcObject = stream;
+      await videoEl.play();
+      timer = window.setInterval(checkFrame, 350);
+      if (scanMode === "jsqr") {
+        setStatus(config.compatPrompt);
+      } else {
+        setStatus(config.prompt);
+      }
+      startButton.disabled = true;
+      stopButton.disabled = false;
+    } catch (error) {
+      if (error && error.message === "compat-load-failed") {
+        setStatus(config.compatLoadFailureMessage);
+      } else if (error && error.message === "camera-unsupported") {
+        setStatus(config.cameraUnsupportedMessage);
+      } else {
+        setStatus("Camera access failed. Check browser camera permissions.");
+      }
+      stopScanner();
+    }
+  }
+
+  startButton.addEventListener("click", startScanner);
+  stopButton.addEventListener("click", () => {
+    stopScanner();
+    setStatus("Scanner stopped.");
+  });
+
+  if (referenceEl && !referenceEl.value && config.referenceValue) {
+    referenceEl.value = config.referenceValue;
+  }
+}
+"""
+
+
+HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
+(() => {
+  function extractSpoolId(value) {
+    const trimmed = String(value || "").trim();
+    const patterns = [
+      /web\+spoolman:s-(\d+)/i,
+      /\/spool\/show\/(\d+)/,
+      /\/spool\/(\d+)/,
+      /[?&]spool_id=(\d+)/,
+      /^(\d+)$/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = trimmed.match(pattern);
+      if (match) {
+        return match[1];
+      }
+    }
+    return null;
+  }
+
+  createQrScanner({
+    startButtonId: "startSpoolScanner",
+    stopButtonId: "stopSpoolScanner",
+    statusId: "spoolScannerStatus",
+    videoId: "spoolScannerVideo",
+    canvasId: "spoolScannerCanvas",
+    referenceId: "spoolScanReference",
+    referenceValue: "web+spoolman:s-42",
+    prompt: "Point your camera at a Spoolman spool QR code.",
+    compatPrompt: "Point your camera at a Spoolman spool QR code. Compatibility scanner is active for this browser.",
+    readFailureMessage: "Scanner could not read a supported spool QR yet. Keep the QR in view.",
+    compatLoadFailureMessage: "This browser needs the compatibility scanner, but it could not be loaded. Try again or open the QR with your camera app.",
+    cameraUnsupportedMessage: "This browser cannot open the camera from this page. Try Safari or your phone camera app.",
+    handleValue(rawValue) {
+      if (!extractSpoolId(rawValue)) {
+        return null;
+      }
+      return {
+        url: `/scan?value=${encodeURIComponent(rawValue)}&stay=1`,
+        status: `Scanned spool QR. Opening bin scanner...`,
+      };
+    },
+  });
+})();
+"""
+
+
+SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
+(() => {
   function toBinUrl(rawValue) {
     const value = String(rawValue || "").trim();
     const directMatch = value.match(/\/bin\/([^\/?#]+)/i);
@@ -576,57 +805,30 @@ SCAN_PAGE_SCRIPT = r"""
     return null;
   }
 
-  async function checkFrame() {
-    if (!detector || !videoEl.videoWidth || !videoEl.videoHeight) {
-      return;
-    }
-    try {
-      const codes = await detector.detect(videoEl);
-      for (const code of codes) {
-        const target = toBinUrl(code.rawValue);
-        if (target) {
-          statusEl.textContent = `Scanned ${code.rawValue}. Updating location...`;
-          stopScanner();
-          window.location.href = target;
-          return;
-        }
+  createQrScanner({
+    startButtonId: "startBinScanner",
+    stopButtonId: "stopBinScanner",
+    statusId: "scannerStatus",
+    videoId: "scannerVideo",
+    canvasId: "scannerCanvas",
+    referenceId: "spoolBudBase",
+    referenceValue: `${window.location.origin}/bin/`,
+    prompt: "Point your camera at a bin QR code.",
+    compatPrompt: "Point your camera at a bin QR code. Compatibility scanner is active for this browser.",
+    readFailureMessage: "Scanner could not read that frame yet. Keep the QR in view.",
+    compatLoadFailureMessage: "This browser needs the compatibility scanner, but it could not be loaded. Try again or open the bin QR with your camera app.",
+    cameraUnsupportedMessage: "This browser cannot open the camera from this page. Try Safari or your phone camera app.",
+    handleValue(rawValue) {
+      const target = toBinUrl(rawValue);
+      if (!target) {
+        return null;
       }
-    } catch (error) {
-      statusEl.textContent = "Scanner could not read that frame yet. Keep the QR in view.";
-    }
-  }
-
-  async function startScanner() {
-    if (!("BarcodeDetector" in window)) {
-      statusEl.textContent = "This browser does not support BarcodeDetector yet. Use a browser like recent Chrome on mobile.";
-      return;
-    }
-
-    try {
-      detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      videoEl.srcObject = stream;
-      await videoEl.play();
-      timer = window.setInterval(checkFrame, 350);
-      statusEl.textContent = "Point your camera at a bin QR code.";
-      startButton.disabled = true;
-      stopButton.disabled = false;
-    } catch (error) {
-      statusEl.textContent = "Camera access failed. Check browser camera permissions.";
-      stopScanner();
-    }
-  }
-
-  startButton.addEventListener("click", startScanner);
-  stopButton.addEventListener("click", () => {
-    stopScanner();
-    statusEl.textContent = "Scanner stopped.";
+      return {
+        url: target,
+        status: `Scanned ${rawValue}. Updating location...`,
+      };
+    },
   });
-
-  const directBinBase = `${window.location.origin}/bin/`;
-  if (!spoolBudBaseEl.value) {
-    spoolBudBaseEl.value = directBinBase;
-  }
 })();
 """
 
@@ -714,6 +916,23 @@ def spool_summary(spool: dict[str, Any]) -> str:
     if unique_details:
         return " / ".join(unique_details)
     return "No extra material details from Spoolman"
+
+
+def spool_display_name(spool: dict[str, Any]) -> str | None:
+    value = spool.get("name")
+    if value:
+        return str(value)
+
+    filament = spool.get("filament")
+    if isinstance(filament, dict):
+        filament_name = filament.get("name")
+        if filament_name:
+            return str(filament_name)
+
+    summary = spool_summary(spool)
+    if summary != "No extra material details from Spoolman":
+        return summary
+    return None
 
 
 def selected_spool_id(request: Request | None) -> int | None:
@@ -833,6 +1052,14 @@ async def fetch_spoolman_spools() -> list[dict[str, Any]]:
         return payload if isinstance(payload, list) else []
 
 
+async def fetch_spoolman_spool(spool_id: int) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        response = await client.get(f"{SPOOLMAN_BASE}/api/v1/spool/{spool_id}", headers=auth_headers())
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+
 async def fetch_spoolman_locations() -> list[str]:
     spools = await fetch_spoolman_spools()
     seen: set[str] = set()
@@ -872,8 +1099,24 @@ def home(request: Request) -> HTMLResponse:
         </div>
         <div>
           <h1>Scan a spool, then scan a bin</h1>
-          <p class="muted">Use <code>/scan?value=...</code> to select a spool, then scan a stable bin QR such as <code>/bin/F-001</code> to update its location in Spoolman.</p>
+          <p class="muted">Open SpoolBud, scan a Spoolman spool QR, then scan a stable bin QR such as <code>/bin/F-001</code> to update its location in Spoolman.</p>
         </div>
+      </section>
+
+      <section class="panel scanner-wrap">
+        <h2>Scan a Spoolman QR</h2>
+        <p class="muted">Start here for the in-browser flow: scan a native Spoolman spool QR such as <code>web+spoolman:s-42</code>, then SpoolBud will open the bin scanner on the next screen.</p>
+        <div class="toolbar">
+          <button id="startSpoolScanner" class="button" type="button">Scan spool QR</button>
+          <button id="stopSpoolScanner" class="button" type="button" disabled>Stop scanner</button>
+        </div>
+        <video id="spoolScannerVideo" class="scanner-video" playsinline muted></video>
+        <canvas id="spoolScannerCanvas" hidden></canvas>
+        <p id="spoolScannerStatus" class="muted">Tap <strong>Scan spool QR</strong> to open the camera.</p>
+        <label>
+          <div class="muted">Supported spool QR payload example</div>
+          <input id="spoolScanReference" class="input" value="" readonly />
+        </label>
       </section>
 
       <section class="panel">
@@ -887,6 +1130,7 @@ def home(request: Request) -> HTMLResponse:
         </ul>
       </section>
     </main>
+    <script>{HOME_SCAN_PAGE_SCRIPT}</script>
     """
     return render_page("Home", body, request=request, active_nav="home")
 
@@ -897,17 +1141,34 @@ def healthz() -> dict[str, object]:
 
 
 @app.get("/scan")
-def scan(request: Request, value: str, stay: str | None = Query(default=None)):
+async def scan(request: Request, value: str, stay: str | None = Query(default=None)):
     spool_id = extract_spool_id(value)
     if spool_id is None:
         raise HTTPException(status_code=400, detail="Could not parse spool ID from QR value")
 
     if wants_scan_stay(stay):
+        spool_name_markup = ""
+        spool_details_notice = ""
+        try:
+            spool = await fetch_spoolman_spool(spool_id)
+        except httpx.HTTPError:
+            spool = {}
+            spool_details_notice = (
+                '<p class="muted">SpoolBud selected this spool, but could not load its details from Spoolman right now.</p>'
+            )
+
+        if spool:
+            display_name = spool_display_name(spool)
+            if display_name:
+                spool_name_markup = f'<p><strong>{escape(display_name)}</strong></p>'
+
         body = f"""
         <main class="stack">
           <section class="panel">
             <h1>Spool {spool_id} selected</h1>
-            <p class="muted">You can stay in SpoolBud and scan a bin QR directly from this page.</p>
+            {spool_name_markup}
+            <p class="muted">You can stay in SpoolBud and scan a bin QR directly from this page. WebKit-based browsers such as Chrome on iPhone automatically use a compatibility scanner.</p>
+            {spool_details_notice}
             <p><a href="{escape(spool_url(spool_id), quote=True)}" target="_blank" rel="noreferrer">Open this spool in Spoolman</a></p>
           </section>
 
@@ -917,6 +1178,7 @@ def scan(request: Request, value: str, stay: str | None = Query(default=None)):
               <button id="stopBinScanner" class="button" type="button" disabled>Stop scanner</button>
             </div>
             <video id="scannerVideo" class="scanner-video" playsinline muted></video>
+            <canvas id="scannerCanvas" hidden></canvas>
             <p id="scannerStatus" class="muted">Tap <strong>Scan bin QR</strong> to open the camera.</p>
             <label>
               <div class="muted">Bin URL prefix (reference)</div>
