@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as spoolbud_app
+from spoolbud import dependencies as deps
 
 
 def create_client() -> TestClient:
@@ -31,7 +32,7 @@ def test_scan_stay_sets_cookie_and_shows_scanner_page(monkeypatch):
         assert spool_id == 42
         return {"id": 42, "name": "Orange PETG"}
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spool", fake_fetch)
+    monkeypatch.setattr(deps, "fetch_spoolman_spool", fake_fetch)
 
     with create_client() as client:
         resp = client.get(
@@ -54,7 +55,7 @@ def test_scan_stay_survives_spoolman_lookup_failure(monkeypatch):
         assert spool_id == 42
         raise httpx.HTTPError("boom")
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spool", fake_fetch)
+    monkeypatch.setattr(deps, "fetch_spoolman_spool", fake_fetch)
 
     with create_client() as client:
         resp = client.get(
@@ -93,7 +94,7 @@ def test_bin_without_cookie_shows_bin_contents(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spools_in_location", fake_fetch)
+    monkeypatch.setattr(deps, "fetch_spools_in_location", fake_fetch)
 
     with create_client() as client:
         resp = client.get("/bin/F-001")
@@ -109,7 +110,7 @@ def test_bin_without_cookie_shows_empty_bin(monkeypatch):
         assert location == "F-001"
         return []
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spools_in_location", fake_fetch)
+    monkeypatch.setattr(deps, "fetch_spools_in_location", fake_fetch)
 
     with create_client() as client:
         resp = client.get("/bin/F-001")
@@ -123,7 +124,7 @@ def test_bin_with_cookie_updates_location_and_clears_cookie(monkeypatch):
         assert location == "F-001"
         return httpx.Response(200, request=httpx.Request("PATCH", "https://spoolman.test"))
 
-    monkeypatch.setattr(spoolbud_app, "patch_spool_location", fake_patch)
+    monkeypatch.setattr(deps, "patch_spool_location", fake_patch)
 
     with create_client() as client:
         client.cookies.set(spoolbud_app.COOKIE_NAME, "42")
@@ -160,7 +161,7 @@ def test_api_spools(monkeypatch):
     async def fake_fetch():
         return [{"id": 9}, {"id": 1}, {"id": 9}, {"id": "bad"}]
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spools", fake_fetch)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", fake_fetch)
 
     with create_client() as client:
         resp = client.get("/api/spools")
@@ -205,7 +206,7 @@ def test_move_stays_in_spoolbud_and_clears_selection(monkeypatch, via_api):
         assert (spool_id, location) == (42, "PRINTER / LEFT & <RIGHT>")
         return httpx.Response(200, request=httpx.Request("PATCH", "https://spoolman.test"))
 
-    monkeypatch.setattr(spoolbud_app, "patch_spool_location", fake_patch)
+    monkeypatch.setattr(deps, "patch_spool_location", fake_patch)
     with create_client() as client:
         client.get("/select/42", follow_redirects=False)
         if via_api:
@@ -227,7 +228,7 @@ def test_failed_move_preserves_selection_without_exposing_upstream_details(monke
             raise httpx.TimeoutException("private connection details")
         return httpx.Response(500, text="private connection details", request=httpx.Request("PATCH", "https://spoolman.test"))
 
-    monkeypatch.setattr(spoolbud_app, "patch_spool_location", fake_patch)
+    monkeypatch.setattr(deps, "patch_spool_location", fake_patch)
     with create_client() as client:
         client.get("/select/42", follow_redirects=False)
         response = (client.post("/api/move", json={"spool_id": 42, "location": "F-001"}) if via_api
@@ -244,7 +245,7 @@ def test_stale_page_cannot_move_or_clear_another_selection(monkeypatch, selectio
     async def unexpected_patch(*args):
         pytest.fail("A stale page must never update Spoolman")
 
-    monkeypatch.setattr(spoolbud_app, "patch_spool_location", unexpected_patch)
+    monkeypatch.setattr(deps, "patch_spool_location", unexpected_patch)
     with create_client() as client:
         if selection:
             client.get(f"/select/{selection}", follow_redirects=False)
@@ -269,7 +270,7 @@ def test_invalid_destination_never_calls_spoolman(monkeypatch, location):
     async def unexpected_patch(*args):
         pytest.fail("Invalid locations must never reach Spoolman")
 
-    monkeypatch.setattr(spoolbud_app, "patch_spool_location", unexpected_patch)
+    monkeypatch.setattr(deps, "patch_spool_location", unexpected_patch)
     with create_client() as client:
         client.get("/select/42", follow_redirects=False)
         assert client.post("/api/move", json={"spool_id": 42, "location": location}).status_code == 400
@@ -277,12 +278,12 @@ def test_invalid_destination_never_calls_spoolman(monkeypatch, location):
 
 
 def test_destinations_merge_configured_empty_bins_and_spoolman(monkeypatch):
-    monkeypatch.setattr(spoolbud_app, "DESTINATIONS", " empty-bin, printer / left\nEMPTY-BIN ")
+    monkeypatch.setattr(deps, "DESTINATIONS", " empty-bin, printer / left\nEMPTY-BIN ")
 
     async def fake_fetch():
         return [{"id": 42, "location": "printer / left"}, {"id": 43, "location": "used-bin"}]
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spools", fake_fetch)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", fake_fetch)
     with create_client() as client:
         response = client.get("/api/bins?source=all")
     assert response.json() == {"source": "all", "bins": ["EMPTY-BIN", "PRINTER / LEFT", "USED-BIN"], "warning": None}
@@ -290,12 +291,12 @@ def test_destinations_merge_configured_empty_bins_and_spoolman(monkeypatch):
 
 @pytest.mark.parametrize("configured", ["", " empty-bin "])
 def test_destination_lookup_failure_keeps_fallback_visible(monkeypatch, configured):
-    monkeypatch.setattr(spoolbud_app, "DESTINATIONS", configured)
+    monkeypatch.setattr(deps, "DESTINATIONS", configured)
 
     async def failed_fetch():
         raise httpx.ConnectError("offline")
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spools", failed_fetch)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", failed_fetch)
     with create_client() as client:
         response = client.get("/api/bins?source=all")
     assert response.status_code == 200
@@ -314,8 +315,8 @@ def test_spool_preparation_details_and_selected_page_escape_content(monkeypatch,
     async def fake_fetch_one(spool_id):
         return spool
 
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spools", fake_fetch_all)
-    monkeypatch.setattr(spoolbud_app, "fetch_spoolman_spool", fake_fetch_one)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", fake_fetch_all)
+    monkeypatch.setattr(deps, "fetch_spoolman_spool", fake_fetch_one)
     with create_client() as client:
         data = client.get("/api/spools").json()
         response = client.get("/scan?value=42&stay=1")

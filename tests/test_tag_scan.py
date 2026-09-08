@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 import app
 import spoolman_tags
+from spoolbud import dependencies as deps
 
 
 @pytest.fixture
@@ -22,7 +23,7 @@ def upstream(monkeypatch):
         return state["response"]
 
     monkeypatch.setattr(spoolman_tags.httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
-    monkeypatch.setattr(app, "SPOOLMAN_BASE", "https://spoolman.test")
+    monkeypatch.setattr(deps, "SPOOLMAN_BASE", "https://spoolman.test")
     return state
 
 
@@ -31,7 +32,7 @@ def selected(client):
 
 
 def test_tag_scan_forwards_contract_and_uses_only_upstream_match(upstream, monkeypatch):
-    monkeypatch.setattr(app, "API_TOKEN", "test-credential")
+    monkeypatch.setattr(deps, "API_TOKEN", "test-credential")
     upstream["response"] = httpx.Response(200, json={"uid": "04A2B3C4", "matched_spool_id": 42, "spool": {"id": 999}})
     body = {"uid": "04:a2-b3:c4", "reader_id": "desk-1", "name": "Desk", "format": "ntag", "payload_b64": "NDI="}
     with TestClient(app.app) as client:
@@ -152,8 +153,8 @@ def test_tag_selection_opens_shared_actions_without_qr_parsing(upstream, monkeyp
         assert value in {"", "42"}
         return int(value) if value else None
 
-    monkeypatch.setattr(app, "fetch_spoolman_spool", metadata)
-    monkeypatch.setattr(app, "extract_spool_id", no_qr_fallback)
+    monkeypatch.setattr(deps, "fetch_spoolman_spool", metadata)
+    monkeypatch.setattr(deps, "extract_spool_id", no_qr_fallback)
     with TestClient(app.app) as client:
         client.post("/api/tag/scan", json={"uid": "04-AA-BB"})
         page = client.get("/selected?spool_id=999")
@@ -174,7 +175,7 @@ def test_resolved_spool_moves_only_after_explicit_action(upstream, monkeypatch, 
         moves.append((spool_id, location))
         return httpx.Response(200, request=httpx.Request("PATCH", "https://spoolman.test"))
 
-    monkeypatch.setattr(app, "patch_spool_location", patch)
+    monkeypatch.setattr(deps, "patch_spool_location", patch)
     with TestClient(app.app) as client:
         client.post("/api/tag/scan", json={"uid": "999"})
         assert not moves
