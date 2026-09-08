@@ -8,13 +8,14 @@ from typing import Any
 
 import httpx
 import segno
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 SPOOLMAN_BASE = os.getenv("SPOOLMAN_BASE", "https://filament.igetno.net").rstrip("/")
 API_TOKEN = os.getenv("SPOOLMAN_API_TOKEN", "")
 COOKIE_NAME = os.getenv("COOKIE_NAME", "last_spool_id")
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+DESTINATIONS = os.getenv("DESTINATIONS", "")
 
 app = FastAPI(title="SpoolBud Helper")
 
@@ -30,6 +31,8 @@ LOCATION_KEYS = ("location", "bin", "storage_location")
 EXTRA_LOCATION_KEYS = ("location", "bin")
 
 BASE_STYLES = """
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -287,6 +290,15 @@ textarea.input {
   gap: 1rem;
 }
 
+.destination-grid {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.destination-grid .button {
+  min-height: 48px;
+  overflow-wrap: anywhere;
+}
+
 .card {
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -296,6 +308,7 @@ textarea.input {
 
 .qr-card {
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .qr-card img {
@@ -469,187 +482,189 @@ THEME_SCRIPT = """
 })();
 """
 
+COMMON_SCRIPT = r"""
+async function requestJson(url, body) {
+  const response = await fetch(url, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof data.detail === "string" ? data.detail : "Request failed. Please try again.");
+  }
+  return data;
+}
+
+function parseSpoolId(value) {
+  let raw = String(value || "").trim();
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.pathname === "/scan") raw = url.searchParams.get("value") || raw;
+  } catch (_) {}
+  for (const pattern of [/web\+spoolman:s-(\d+)/i, /\/spool\/show\/(\d+)/,
+      /\/spool\/(\d+)/, /[?&]spool_id=(\d+)/, /^(\d+)$/]) {
+    const match = raw.match(pattern);
+    if (match && Number(match[1]) > 0) return String(Number(match[1]));
+  }
+  return null;
+}
+
+function labelBase(value) {
+  const url = new URL(value.trim());
+  if (!["https:", "http:"].includes(url.protocol) || url.search || url.hash || url.username || url.password) {
+    throw new Error("Enter an HTTP or HTTPS SpoolBud base URL without query parameters or credentials.");
+  }
+  return url.href.replace(/\/$/, "");
+}
+
+function spoolTagLink(base, id) {
+  return `${base}/scan?value=${encodeURIComponent(id)}&stay=1`;
+}
+
+function createLabelCard(title, qrValue, nfcLink, description = "", color = null) {
+  const card = document.createElement("article");
+  card.className = "card qr-card stack";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const details = document.createElement("div");
+  details.textContent = description;
+  if (color && /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(color)) {
+    const swatch = document.createElement("span");
+    swatch.className = "color-swatch";
+    swatch.style.backgroundColor = color;
+    swatch.setAttribute("aria-label", `Color ${color}`);
+    details.prepend(swatch);
+    details.append(` · ${color}`);
+  }
+  const qr = document.createElement("img");
+  qr.alt = `QR for ${title}`;
+  qr.src = `/qr.svg?value=${encodeURIComponent(qrValue)}`;
+  const payload = document.createElement("code");
+  payload.textContent = qrValue;
+  const input = document.createElement("input");
+  input.className = "input";
+  input.readOnly = true;
+  input.value = nfcLink;
+  input.setAttribute("aria-label", `NFC link for ${title}`);
+  const copy = document.createElement("button");
+  copy.className = "button";
+  copy.type = "button";
+  copy.textContent = "Copy NFC link";
+  const status = document.createElement("div");
+  status.setAttribute("role", "status");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(nfcLink);
+      status.textContent = "Link copied. Paste it as a URL/URI record in your NFC writer.";
+    } catch (_) {
+      input.focus();
+      input.select();
+      status.textContent = "Copy the selected link manually, then paste it into your NFC writer.";
+    }
+  });
+  card.append(heading, details, qr, payload, input, copy, status);
+  return card;
+}
+"""
+
 BINS_PAGE_SCRIPT = r"""
 (() => {
   const binsEl = document.getElementById("bins");
   const statusEl = document.getElementById("status");
   const gridEl = document.getElementById("grid");
-  const publicBaseEl = document.getElementById("publicBase");
-  const loadDefaultButton = document.getElementById("loadDefault");
-  const loadSpoolmanButton = document.getElementById("loadSpoolman");
-  const renderButton = document.getElementById("render");
-
-  if (!binsEl || !statusEl || !gridEl || !publicBaseEl || !loadDefaultButton || !loadSpoolmanButton || !renderButton) {
-    return;
-  }
-
-  if (!publicBaseEl.value) {
-    publicBaseEl.value = window.location.origin;
-  }
+  const baseEl = document.getElementById("publicBase");
+  baseEl.value = window.location.origin;
 
   async function loadBins(source) {
-    statusEl.textContent = `Loading bins from ${source}...`;
+    statusEl.textContent = "Loading destinations...";
     try {
-      const response = await fetch(`/api/bins?source=${encodeURIComponent(source)}`);
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.detail || "Request failed");
-      }
+      const data = await requestJson(`/api/bins?source=${source}`);
       binsEl.value = data.bins.join("\n");
-      statusEl.textContent = `Loaded ${data.bins.length} bins from ${data.source}.`;
+      statusEl.textContent = data.warning || `Loaded ${data.bins.length} destinations.`;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      statusEl.textContent = `Failed to load bins: ${message}`;
+      statusEl.textContent = error.message;
     }
   }
 
   function renderLabels() {
-    const lines = binsEl.value
-      .split("\n")
-      .map((value) => value.trim().toUpperCase())
-      .filter(Boolean);
-    const publicBase = publicBaseEl.value.trim().replace(/\/$/, "");
-
-    if (!publicBase) {
-      statusEl.textContent = "Enter a public helper base URL first.";
-      return;
+    try {
+      const base = labelBase(baseEl.value);
+      const locations = [...new Set(binsEl.value.split("\n").map(value => value.trim().toUpperCase()).filter(Boolean))];
+      gridEl.replaceChildren();
+      for (const location of locations) {
+        const target = `${base}/bin/${encodeURIComponent(location)}?stay=1`;
+        gridEl.appendChild(createLabelCard(location, target, target));
+      }
+      statusEl.textContent = `Prepared ${locations.length} destination labels and NFC links.`;
+    } catch (error) {
+      statusEl.textContent = error.message;
     }
-
-    gridEl.innerHTML = "";
-    for (const location of [...new Set(lines)]) {
-      const target = `${publicBase}/bin/${encodeURIComponent(location)}`;
-      const qrSrc = `/qr.svg?value=${encodeURIComponent(target)}`;
-      const card = document.createElement("article");
-      card.className = "card qr-card";
-      card.innerHTML = `
-        <h3>${location}</h3>
-        <img alt="QR for ${location}" src="${qrSrc}" />
-        <div class="muted">${target}</div>
-      `;
-      gridEl.appendChild(card);
-    }
-
-    statusEl.textContent = `Rendered ${gridEl.children.length} QR labels.`;
   }
 
-  loadDefaultButton.addEventListener("click", () => loadBins("default"));
-  loadSpoolmanButton.addEventListener("click", () => loadBins("spoolman"));
-  renderButton.addEventListener("click", renderLabels);
-  loadBins("default");
+  document.getElementById("loadDefault").addEventListener("click", () => loadBins("default"));
+  document.getElementById("loadSpoolman").addEventListener("click", () => loadBins("all"));
+  document.getElementById("render").addEventListener("click", renderLabels);
+  loadBins("all");
 })();
 """
 
 SPOOLS_PAGE_SCRIPT = r"""
 (() => {
-  const spoolInputEl = document.getElementById("spools");
+  const inputEl = document.getElementById("spools");
   const statusEl = document.getElementById("spoolStatus");
   const gridEl = document.getElementById("spoolGrid");
-  const renderButton = document.getElementById("renderSpools");
-  const loadSampleButton = document.getElementById("loadSpoolSample");
-  const loadSpoolmanButton = document.getElementById("loadSpoolmanSpools");
-  const formatEl = document.getElementById("spoolQrFormat");
-  const publicBaseEl = document.getElementById("spoolPublicBase");
-  const includeStayEl = document.getElementById("includeStayFlag");
-  const spoolmanBaseEl = document.getElementById("spoolmanBase");
+  const baseEl = document.getElementById("spoolPublicBase");
+  const searchEl = document.getElementById("spoolSearch");
+  let spools = new Map();
+  baseEl.value = window.location.origin;
 
-  if (!spoolInputEl || !statusEl || !gridEl || !renderButton || !loadSampleButton || !loadSpoolmanButton || !formatEl || !publicBaseEl || !includeStayEl || !spoolmanBaseEl) {
-    return;
-  }
-
-  if (!publicBaseEl.value) {
-    publicBaseEl.value = window.location.origin;
-  }
-
-  function parseSpoolId(value) {
-    const trimmed = value.trim();
-    const patterns = [
-      /web\+spoolman:s-(\d+)/i,
-      /\/spool\/show\/(\d+)/,
-      /\/spool\/(\d+)/,
-      /[?&]spool_id=(\d+)/,
-      /^(\d+)$/,
-    ];
-    for (const pattern of patterns) {
-      const match = trimmed.match(pattern);
-      if (match) {
-        return match[1];
-      }
-    }
-    return null;
-  }
-
-  async function loadSpoolsFromSpoolman() {
-    statusEl.textContent = "Loading spool IDs from Spoolman...";
-    try {
-      const response = await fetch("/api/spools");
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.detail || "Request failed");
-      }
-      spoolInputEl.value = data.spool_ids.join("\n");
-      statusEl.textContent = `Loaded ${data.spool_ids.length} spool IDs from Spoolman.`;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      statusEl.textContent = `Failed to load spools: ${message}`;
-    }
+  function filterLabels() {
+    const query = searchEl.value.trim().toLowerCase();
+    for (const card of gridEl.children) card.hidden = !card.textContent.toLowerCase().includes(query);
   }
 
   function renderSpools() {
-    const lines = spoolInputEl.value
-      .split("\n")
-      .map((value) => value.trim())
-      .filter(Boolean);
-
-    const format = formatEl.value;
-    const publicBase = publicBaseEl.value.trim().replace(/\/$/, "");
-    const includeStayFlag = Boolean(includeStayEl.checked);
-
-    gridEl.innerHTML = "";
-
-    for (const value of [...new Set(lines)]) {
-      const spoolId = parseSpoolId(value);
-      if (!spoolId) {
-        continue;
+    try {
+      const base = labelBase(baseEl.value);
+      const ids = [...new Set(inputEl.value.split("\n").map(parseSpoolId).filter(Boolean))];
+      gridEl.replaceChildren();
+      for (const id of ids) {
+        const spool = spools.get(Number(id));
+        const nfcLink = spoolTagLink(base, id);
+        const fullUrl = document.getElementById("spoolQrFormat").value === "full-url";
+        const stay = document.getElementById("includeStayFlag").checked;
+        const qrValue = fullUrl ? (stay ? nfcLink : nfcLink.replace("&stay=1", "")) : `web+spoolman:s-${id}`;
+        const description = spool ? `${spool.description} · Location: ${spool.locations.join(", ") || "Unassigned"}` : "";
+        const card = createLabelCard(`Spool ${id}`, qrValue, nfcLink, description, spool?.color_hex);
+        const select = document.createElement("a");
+        select.href = spoolTagLink(window.location.origin, id);
+        select.textContent = "Select in SpoolBud";
+        card.appendChild(select);
+        gridEl.appendChild(card);
       }
-
-      const spoolmanUrl = `/spool/show/${spoolId}`;
-      let qrValue = `web+spoolman:s-${spoolId}`;
-
-      if (format === "full-url") {
-        if (!publicBase) {
-          statusEl.textContent = "Enter a public SpoolBud base URL first.";
-          return;
-        }
-        const spoolmanBase = spoolmanBaseEl.value.trim().replace(/\/$/, "");
-        const spoolValue = `${spoolmanBase}${spoolmanUrl}`;
-        qrValue = `${publicBase}/scan?value=${encodeURIComponent(spoolValue)}`;
-        if (includeStayFlag) {
-          qrValue += "&stay=1";
-        }
-      }
-
-      const qrSrc = `/qr.svg?value=${encodeURIComponent(qrValue)}`;
-      const spoolUrl = `${window.location.origin}/select/${encodeURIComponent(spoolId)}`;
-      const card = document.createElement("article");
-      card.className = "card qr-card";
-      card.innerHTML = `
-        <h3>Spool ${spoolId}</h3>
-        <img alt="QR for spool ${spoolId}" src="${qrSrc}" />
-        <div class="muted"><code>${qrValue}</code></div>
-        <div class="muted"><a href="${spoolUrl}">Select in SpoolBud</a></div>
-      `;
-      gridEl.appendChild(card);
+      filterLabels();
+      statusEl.textContent = `Prepared ${ids.length} spool labels and NFC links. Verify each written tag before attaching it.`;
+    } catch (error) {
+      statusEl.textContent = error.message;
     }
-
-    statusEl.textContent = `Rendered ${gridEl.children.length} spool QR labels.`;
   }
 
-  loadSampleButton.addEventListener("click", () => {
-    spoolInputEl.value = "1\n2\n3";
+  document.getElementById("loadSpoolmanSpools").addEventListener("click", async () => {
+    statusEl.textContent = "Loading spools from Spoolman...";
+    try {
+      const data = await requestJson("/api/spools");
+      spools = new Map(data.spools.map(spool => [spool.id, spool]));
+      inputEl.value = data.spool_ids.join("\n");
+      renderSpools();
+    } catch (error) {
+      statusEl.textContent = error.message;
+    }
+  });
+  document.getElementById("loadSpoolSample").addEventListener("click", () => {
+    inputEl.value = "1\n2\n3";
     renderSpools();
   });
-  loadSpoolmanButton.addEventListener("click", loadSpoolsFromSpoolman);
-  renderButton.addEventListener("click", renderSpools);
+  document.getElementById("renderSpools").addEventListener("click", renderSpools);
+  searchEl.addEventListener("input", filterLabels);
 })();
 """
 
@@ -895,25 +910,6 @@ function createQrScanner(config) {
 
 HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
 (() => {
-  function extractSpoolId(value) {
-    const trimmed = String(value || "").trim();
-    const patterns = [
-      /web\+spoolman:s-(\d+)/i,
-      /\/spool\/show\/(\d+)/,
-      /\/spool\/(\d+)/,
-      /[?&]spool_id=(\d+)/,
-      /^(\d+)$/,
-    ];
-
-    for (const pattern of patterns) {
-      const match = trimmed.match(pattern);
-      if (match) {
-        return match[1];
-      }
-    }
-    return null;
-  }
-
   createQrScanner({
     triggerButtonId: "startSpoolScanner",
     startButtonId: "runSpoolScanner",
@@ -931,12 +927,12 @@ HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
     compatLoadFailureMessage: "This browser needs the compatibility scanner, but it could not be loaded. Try again or open the QR with your camera app.",
     cameraUnsupportedMessage: "This browser cannot open the camera from this page. Try Safari or your phone camera app.",
     handleValue(rawValue) {
-      if (!extractSpoolId(rawValue)) {
+      if (!parseSpoolId(rawValue)) {
         return null;
       }
       return {
-        url: `/scan?value=${encodeURIComponent(rawValue)}&stay=1`,
-        status: `Scanned spool QR. Opening bin scanner...`,
+        url: spoolTagLink(window.location.origin, parseSpoolId(rawValue)),
+        status: "Spool scanned. Choose a destination...",
       };
     },
   });
@@ -946,16 +942,80 @@ HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
 
 SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
 (() => {
+  const actions = document.getElementById("selectionActions");
+  const spoolId = Number(actions.dataset.spoolId);
+  const grid = document.getElementById("destinations");
+  const search = document.getElementById("destinationSearch");
+  const status = document.getElementById("moveStatus");
+  const destinationStatus = document.getElementById("destinationStatus");
+  let busy = false;
+
+  function filterDestinations() {
+    const query = search.value.trim().toUpperCase();
+    for (const button of grid.children) button.hidden = !button.textContent.includes(query);
+  }
+
+  async function submitAction(location) {
+    if (busy) return;
+    busy = true;
+    const controls = actions.querySelectorAll("button, input");
+    controls.forEach(control => { control.disabled = true; });
+    status.textContent = location === null ? "Clearing selection..." : "Updating Spoolman...";
+    try {
+      const data = await requestJson(location === null ? "/api/selection/clear" : "/api/move",
+        location === null ? {spool_id: spoolId} : {spool_id: spoolId, location});
+      if (location === null) {
+        window.location.href = "/";
+        return;
+      }
+      document.getElementById("selectedHeading").textContent = `Spool ${data.spool_id} moved to ${data.location}`;
+      document.getElementById("spoolDetails").hidden = true;
+      actions.hidden = true;
+      document.getElementById("moveComplete").hidden = false;
+      window.history.replaceState(null, "", "/");
+    } catch (error) {
+      status.textContent = error.message;
+      status.scrollIntoView({block: "nearest"});
+    } finally {
+      busy = false;
+      actions.querySelectorAll("button, input").forEach(control => { control.disabled = false; });
+    }
+  }
+
+  requestJson("/api/bins?source=all").then(data => {
+    for (const location of data.bins) {
+      const button = document.createElement("button");
+      button.className = "button";
+      button.type = "button";
+      button.textContent = location;
+      button.disabled = busy;
+      button.addEventListener("click", () => submitAction(location));
+      grid.appendChild(button);
+    }
+    filterDestinations();
+    destinationStatus.textContent = data.warning || "Choose a bucket or printer position below.";
+  }).catch(() => {
+    destinationStatus.textContent = "Could not load destinations. Enter a location below or tap its tag.";
+  });
+  search.addEventListener("input", filterDestinations);
+  document.getElementById("destinationForm").addEventListener("submit", event => {
+    event.preventDefault();
+    if (search.value.trim()) submitAction(search.value.trim());
+  });
+  document.getElementById("cancelSelection").addEventListener("click", () => submitAction(null));
+
   function toBinUrl(rawValue) {
     const value = String(rawValue || "").trim();
-    const directMatch = value.match(/\/bin\/([^\/?#]+)/i);
-    if (directMatch) {
-      return `/bin/${encodeURIComponent(directMatch[1])}`;
-    }
-
+    const suffix = `?stay=1&spool_id=${spoolId}`;
+    try {
+      const url = new URL(value, window.location.origin);
+      if (url.pathname.startsWith("/bin/")) {
+        return `/bin/${encodeURIComponent(decodeURIComponent(url.pathname.slice(5)))}` + suffix;
+      }
+    } catch (_) {}
     const cleaned = value.toUpperCase().replace(/\s+/g, "");
     if (/^[A-Z]-\d{3}$/.test(cleaned)) {
-      return `/bin/${encodeURIComponent(cleaned)}`;
+      return `/bin/${encodeURIComponent(cleaned)}` + suffix;
     }
     return null;
   }
@@ -1023,6 +1083,10 @@ def default_bins() -> list[str]:
     return front + back
 
 
+def configured_bins() -> list[str]:
+    return sorted({normalize_location(value) for value in re.split(r"[,\n]", DESTINATIONS) if value.strip()}) or default_bins()
+
+
 def auth_headers() -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if API_TOKEN:
@@ -1076,23 +1140,6 @@ def spool_summary(spool: dict[str, Any]) -> str:
     return "No extra material details from Spoolman"
 
 
-def spool_display_name(spool: dict[str, Any]) -> str | None:
-    value = spool.get("name")
-    if value:
-        return str(value)
-
-    filament = spool.get("filament")
-    if isinstance(filament, dict):
-        filament_name = filament.get("name")
-        if filament_name:
-            return str(filament_name)
-
-    summary = spool_summary(spool)
-    if summary != "No extra material details from Spoolman":
-        return summary
-    return None
-
-
 def selected_spool_id(request: Request | None) -> int | None:
     if request is None:
         return None
@@ -1110,6 +1157,8 @@ def spool_color_hex(spool: dict[str, Any]) -> str | None:
         if not value:
             continue
         normalized = str(value).strip()
+        if re.fullmatch(r"[0-9a-fA-F]{6}", normalized):
+            normalized = "#" + normalized
         if re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", normalized):
             return normalized.upper()
 
@@ -1148,6 +1197,7 @@ def render_page(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{escape(title)} · SpoolBud</title>
     <style>{BASE_STYLES}</style>
+    <script>{COMMON_SCRIPT}</script>
   </head>
   <body>
     <div class="shell">
@@ -1156,7 +1206,7 @@ def render_page(
           <button id="menuToggle" class="menu-toggle" type="button" aria-expanded="false" aria-controls="sideNav" aria-label="Open navigation menu">☰</button>
           <div class="brand">
             <a href="/"><strong>SpoolBud</strong></a>
-            <span>Fast QR workflows for Spoolman bins</span>
+            <span>NFC and QR workflows for Spoolman</span>
           </div>
         </div>
         <button id="themeToggle" class="theme-toggle" type="button">Dark mode</button>
@@ -1177,13 +1227,13 @@ def render_page(
     return HTMLResponse(html, status_code=status_code)
 
 
-def render_spool_cards(spools: list[dict[str, Any]]) -> str:
+def render_spool_cards(spools: list[dict[str, Any]], *, compact: bool = False) -> str:
     cards: list[str] = []
     for spool in spools:
         spool_id = spool.get("id", "?")
         link_markup = ""
         color_markup = ""
-        if isinstance(spool_id, int):
+        if isinstance(spool_id, int) and not compact:
             link_markup = (
                 f'<p><a href="{escape(spool_url(spool_id), quote=True)}" '
                 'target="_blank" rel="noreferrer">Open in Spoolman</a></p>'
@@ -1198,9 +1248,10 @@ def render_spool_cards(spools: list[dict[str, Any]]) -> str:
             )
         cards.append(
             f"""
-            <article class="card">
-              <h3>Spool {escape(str(spool_id))}</h3>
+            <article class="{"" if compact else "card"}">
+              {"" if compact else f'<h3>Spool {escape(str(spool_id))}</h3>'}
               <p class="spool-meta muted">{escape(spool_summary(spool))}</p>
+              <p class="muted">Location: {escape(", ".join(sorted(spool_location_values(spool))) or "Unassigned")}</p>
               {color_markup}
               {link_markup}
             </article>
@@ -1248,6 +1299,41 @@ async def patch_spool_location(spool_id: int, location: str) -> httpx.Response:
         )
 
 
+def require_selection(request: Request, expected_spool_id: int) -> None:
+    if selected_spool_id(request) != expected_spool_id:
+        raise HTTPException(409, "Spool selection changed or was cleared. Scan your spool again before continuing.")
+
+
+async def move_selected_spool(request: Request, spool_id: int, location: str) -> str:
+    require_selection(request, spool_id)
+    location = normalize_location(location)
+    if not location or len(location) > 200:
+        raise HTTPException(400, "Choose a destination between 1 and 200 characters long.")
+    try:
+        response = await patch_spool_location(spool_id, location)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        raise HTTPException(502, "Spoolman could not confirm the move. Check the spool's location and connection, then try again.") from None
+    return location
+
+
+def clear_selection(response: Response) -> Response:
+    response.delete_cookie(COOKIE_NAME, samesite="Lax")
+    return response
+
+
+@app.post("/api/move")
+async def move_spool(request: Request, spool_id: int = Body(gt=0), location: str = Body()):
+    location = await move_selected_spool(request, spool_id, location)
+    return clear_selection(JSONResponse({"spool_id": spool_id, "location": location}))
+
+
+@app.post("/api/selection/clear")
+def cancel_selection(request: Request, spool_id: int = Body(embed=True, gt=0)):
+    require_selection(request, spool_id)
+    return clear_selection(JSONResponse({"ok": True}))
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     current_spool_id = selected_spool_id(request)
@@ -1258,19 +1344,19 @@ def home(request: Request) -> HTMLResponse:
     <main class="stack">
       <section class="panel hero">
         <div class="summary">
-          <span class="chip">Two-scan workflow</span>
-          <span class="chip">Cookie-backed spool selection</span>
+          <span class="chip">Tap or scan</span>
           {current_spool_markup}
         </div>
         <div>
-          <h1>Scan a spool, then scan a bin</h1>
-          <p class="muted">Open SpoolBud, scan a Spoolman spool QR, then scan a stable bin QR such as <code>/bin/F-001</code> to update its location in Spoolman.</p>
+          <h1>Select a spool, then choose its destination</h1>
+          <p class="muted">Tap a spool NFC tag and open its notification, or scan a spool QR below. Then choose a bucket onscreen, tap a destination tag, or scan its QR.</p>
+          {f'<p><a class="button" href="/scan?value={current_spool_id}&amp;stay=1">Continue with spool {current_spool_id}</a></p>' if current_spool_id else ""}
         </div>
       </section>
 
       <section class="panel scanner-wrap">
         <h2>Scan a Spoolman QR</h2>
-        <p class="muted">Start here for the in-browser flow: scan a native Spoolman spool QR such as <code>web+spoolman:s-42</code>, then SpoolBud will open the bin scanner on the next screen.</p>
+        <p class="muted">Scan a Spoolman QR such as <code>web+spoolman:s-42</code> or a SpoolBud spool link to choose a destination.</p>
         <div class="toolbar">
           <button id="startSpoolScanner" class="button" type="button">Open scanner</button>
         </div>
@@ -1316,11 +1402,11 @@ def healthz() -> dict[str, object]:
 @app.get("/scan")
 async def scan(request: Request, value: str, stay: str | None = Query(default=None)):
     spool_id = extract_spool_id(value)
-    if spool_id is None:
-        raise HTTPException(status_code=400, detail="Could not parse spool ID from QR value")
+    if not spool_id:
+        raise HTTPException(status_code=400, detail="Could not identify a spool. Scan its QR or open its NFC link again.")
 
     if wants_scan_stay(stay):
-        spool_name_markup = ""
+        spool_details_markup = ""
         spool_details_notice = ""
         try:
             spool = await fetch_spoolman_spool(spool_id)
@@ -1331,20 +1417,32 @@ async def scan(request: Request, value: str, stay: str | None = Query(default=No
             )
 
         if spool:
-            display_name = spool_display_name(spool)
-            if display_name:
-                spool_name_markup = f'<p><strong>{escape(display_name)}</strong></p>'
+            spool_details_markup = render_spool_cards([spool], compact=True)
 
         body = f"""
         <main class="stack">
           <section class="panel">
-            <h1>Spool {spool_id} selected</h1>
-            {spool_name_markup}
-            <p class="muted">You can stay in SpoolBud and scan a bin QR directly from this page. WebKit-based browsers such as Chrome on iPhone automatically use a compatibility scanner.</p>
-            {spool_details_notice}
+            <h1 id="selectedHeading">Spool {spool_id} selected</h1>
+            <div id="spoolDetails">{spool_details_markup}{spool_details_notice}</div>
             <p><a href="{escape(spool_url(spool_id), quote=True)}" target="_blank" rel="noreferrer">Open this spool in Spoolman</a></p>
+            <p id="moveComplete" hidden><a class="button" href="/">Move another spool</a></p>
           </section>
 
+          <div id="selectionActions" class="stack" data-spool-id="{spool_id}">
+          <section class="panel stack">
+            <h2>Choose a destination</h2>
+            <p class="muted">Choose a bucket below, tap its NFC tag and open the notification, or scan its QR.</p>
+            <p id="destinationStatus" class="muted" role="status">Loading destinations...</p>
+            <p id="moveStatus" role="status" aria-live="polite"></p>
+            <form id="destinationForm" class="stack">
+              <label>Find or enter a destination
+                <input id="destinationSearch" class="input" type="search" required maxlength="200" placeholder="F-001 or PRINTER-1" />
+              </label>
+              <button class="button" type="submit">Move to entered destination</button>
+            </form>
+            <div id="destinations" class="grid destination-grid"></div>
+            <button id="cancelSelection" class="button" type="button">Cancel selection</button>
+          </section>
           <section class="panel scanner-wrap">
             <div class="toolbar">
               <button id="startBinScanner" class="button" type="button">Open bin scanner</button>
@@ -1366,10 +1464,11 @@ async def scan(request: Request, value: str, stay: str | None = Query(default=No
               <canvas id="scannerCanvas" hidden></canvas>
             </div>
           </section>
+          </div>
         </main>
         <script>{SCAN_PAGE_SCRIPT}</script>
         """
-        response = render_page("Spool Selected", body, request=request)
+        response = render_page("Spool Selected", body)
     else:
         response = RedirectResponse(url=spool_url(spool_id), status_code=302)
 
@@ -1384,9 +1483,14 @@ def select_spool(spool_id: int):
     return response
 
 
-@app.get("/bin/{location}")
-async def set_location(location: str, request: Request):
+@app.get("/bin/{location:path}")
+async def set_location(location: str, request: Request, stay: str | None = None, spool_id: int | None = Query(default=None, gt=0)):
     normalized_location = normalize_location(location)
+    if spool_id is not None:
+        try:
+            require_selection(request, spool_id)
+        except HTTPException as exc:
+            return render_move_error(request, exc)
     spool_id = selected_spool_id(request)
 
     if spool_id is None:
@@ -1420,25 +1524,34 @@ async def set_location(location: str, request: Request):
         <main class="panel">
           <h1>{escape(normalized_location)} is empty</h1>
           <p class="muted">No spool is selected in this browser, and Spoolman does not currently list any spools in this bin.</p>
-          <p>Scan a spool QR first if you want this bin scan to update a location.</p>
+          <p>Tap a spool NFC tag or scan a spool QR first to update its location.</p>
         </main>
         """
         return render_page(f"Bin {normalized_location}", body, request=request)
 
-    resp = await patch_spool_location(spool_id, normalized_location)
-    if resp.status_code >= 400:
-        body = f"""
-        <main class="panel">
-          <h1>Update failed</h1>
-          <p class="muted">Tried to set spool <strong>{spool_id}</strong> to <strong>{escape(normalized_location)}</strong>.</p>
-          <pre class="card">{escape(resp.text)}</pre>
-        </main>
-        """
-        return render_page("Update Failed", body, request=request, status_code=502)
+    try:
+        normalized_location = await move_selected_spool(request, spool_id, normalized_location)
+    except HTTPException as exc:
+        return render_move_error(request, exc)
 
-    response = RedirectResponse(url=spool_url(spool_id), status_code=302)
-    response.delete_cookie(COOKIE_NAME, samesite="Lax")
-    return response
+    if wants_scan_stay(stay):
+        body = f"""<main class="panel">
+          <h1>Spool {spool_id} moved to {escape(normalized_location)}</h1>
+          <p><a class="button" href="/">Move another spool</a></p>
+          <p><a href="{escape(spool_url(spool_id), quote=True)}">Open in Spoolman</a></p>
+        </main>"""
+        response = render_page("Spool moved", body)
+    else:
+        response = RedirectResponse(url=spool_url(spool_id), status_code=302)
+    return clear_selection(response)
+
+
+def render_move_error(request: Request, exc: HTTPException) -> HTMLResponse:
+    body = f"""<main class="panel">
+      <h1>Move not confirmed</h1><p>{escape(str(exc.detail))}</p>
+      <p><a href="/">Return to SpoolBud</a></p>
+    </main>"""
+    return render_page("Move not confirmed", body, request=request, status_code=exc.status_code)
 
 
 @app.get("/status", response_class=JSONResponse)
@@ -1451,7 +1564,15 @@ def status(request: Request) -> dict[str, object]:
 
 
 @app.get("/api/bins", response_class=JSONResponse)
-async def api_bins(source: str = Query(default="default", pattern="^(default|spoolman)$")):
+async def api_bins(source: str = Query(default="default", pattern="^(default|spoolman|all)$")):
+    if source == "all":
+        bins = set(configured_bins())
+        warning = None
+        try:
+            bins.update(await fetch_spoolman_locations())
+        except httpx.HTTPError:
+            warning = "Could not load locations from Spoolman. Showing configured/default destinations."
+        return {"source": "all", "bins": sorted(bins), "warning": warning}
     if source == "spoolman":
         try:
             bins = await fetch_spoolman_locations()
@@ -1472,8 +1593,13 @@ async def api_spools():
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to load spools from Spoolman: {exc}") from exc
 
-    spool_ids = sorted({spool.get("id") for spool in spools if isinstance(spool.get("id"), int)})
-    return {"source": "spoolman", "spool_ids": spool_ids}
+    by_id = {spool["id"]: spool for spool in spools if isinstance(spool.get("id"), int) and spool["id"] > 0}
+    summaries = [
+        {"id": spool_id, "description": spool_summary(by_id[spool_id]),
+         "color_hex": spool_color_hex(by_id[spool_id]), "locations": sorted(spool_location_values(by_id[spool_id]))}
+        for spool_id in sorted(by_id)
+    ]
+    return {"source": "spoolman", "spool_ids": sorted(by_id), "spools": summaries}
 
 @app.get("/qr.svg")
 def qr_svg(value: str = Query(min_length=1, max_length=2048)) -> Response:
@@ -1488,8 +1614,9 @@ def bins_page(request: Request) -> HTMLResponse:
     body = f"""
     <main class="stack">
       <section class="panel">
-        <h1>Bin QR Generator</h1>
-        <p class="muted">Generate stable QR labels for <code>/bin/&lt;location&gt;</code>. Load defaults, pull current locations from Spoolman, then render printable labels below.</p>
+        <h1>Bin QR Generator &amp; NFC Tags</h1>
+        <p class="muted">Prepare matching QR labels and NFC links for buckets and printer positions. Load configured and used destinations, or enter names below.</p>
+        <p class="muted">Copy each NFC link into your writing app as a URL/URI record. Cancel any active spool selection before tapping a destination tag just to verify it; a selected spool will be moved.</p>
       </section>
 
       <section class="panel stack">
@@ -1499,7 +1626,7 @@ def bins_page(request: Request) -> HTMLResponse:
             <input id="publicBase" class="input" value="" />
           </label>
           <button id="loadDefault" class="button" type="button">Load defaults</button>
-          <button id="loadSpoolman" class="button" type="button">Load from Spoolman</button>
+          <button id="loadSpoolman" class="button" type="button">Load destinations</button>
           <button id="render" class="button" type="button">Render labels</button>
         </div>
 
@@ -1522,8 +1649,9 @@ def spools_page(request: Request) -> HTMLResponse:
     body = f"""
     <main class="stack">
       <section class="panel">
-        <h1>Spoolman-Compatible Spool QR Labels</h1>
-        <p class="muted">Generate spool QR payloads in the <code>web+spoolman:s-&lt;id&gt;</code> format that Spoolman's built-in camera scanner understands.</p>
+        <h1>Spoolman-Compatible Spool QR Labels &amp; NFC Tags</h1>
+        <p>Create each physical spool in <a href="{escape(SPOOLMAN_BASE, quote=True)}" target="_blank" rel="noreferrer">Spoolman</a>, then load the list below to prepare its tag.</p>
+        <p class="muted">Copy the NFC link into NFC Tools: Write → Add a record → URL/URI → paste → Write. Tap the written tag and check the spool details before attaching it. Only the writing app writes the physical tag.</p>
       </section>
 
       <section class="panel stack">
@@ -1536,13 +1664,13 @@ def spools_page(request: Request) -> HTMLResponse:
         <label style="max-width: 24rem;">
           <div class="muted">QR format</div>
           <select id="spoolQrFormat" class="input">
-            <option value="spoolman">Spoolman scanner payload (web+spoolman)</option>
             <option value="full-url">Full SpoolBud /scan URL</option>
+            <option value="spoolman">Spoolman scanner payload (web+spoolman)</option>
           </select>
         </label>
 
         <label>
-          <div class="muted">Public SpoolBud base URL (for full URL format)</div>
+          <div class="muted">Public SpoolBud base URL (for NFC and full URL QR labels)</div>
           <input id="spoolPublicBase" class="input" value="" />
         </label>
 
@@ -1550,14 +1678,15 @@ def spools_page(request: Request) -> HTMLResponse:
           <input id="includeStayFlag" type="checkbox" checked /> Include <code>&amp;stay=1</code> in full URL QR labels
         </label>
 
-        <input id="spoolmanBase" type="hidden" value="{escape(SPOOLMAN_BASE, quote=True)}" />
-
         <label>
           <div class="muted">Spool IDs or Spoolman spool URLs, one per line</div>
           <textarea id="spools" class="input" placeholder="42&#10;108&#10;256"></textarea>
         </label>
 
         <div id="spoolStatus" class="muted"></div>
+        <label>Find a spool by ID, material, color, or location
+          <input id="spoolSearch" class="input" type="search" placeholder="Search loaded labels" />
+        </label>
         <div id="spoolGrid" class="grid"></div>
       </section>
     </main>

@@ -1,16 +1,14 @@
 # spoolbud helper service
 
-A small FastAPI companion service for Spoolman that supports a two-scan workflow:
+A small FastAPI companion service for Spoolman with an NFC and QR location workflow:
 
-1. Open SpoolBud and scan a spool QR code to select a spool.
-   - The homepage can scan native Spoolman spool QR payloads such as `web+spoolman:s-42` and opens the bin scanner automatically.
-   - Direct links to `GET /scan?value=...` still work for URL-based or numeric spool QR formats.
-   - Optional: use `/scan?value=...&stay=1` to keep the phone in SpoolBud and launch an in-page bin QR scanner button (no extra browser tabs/windows).
-   - The in-page scanner prefers the browser's native `BarcodeDetector` and automatically falls back to a compatibility QR decoder for WebKit-based browsers such as Chrome on iPhone.
-2. Scan a bin QR code (`/bin/F-001`) to move the selected spool to that location, clear the active spool selection cookie, and redirect back to that spool in Spoolman.
-3. If a bin is scanned without an active spool selection, SpoolBud shows the current contents of that bin from Spoolman instead of failing.
+1. Tap a spool NFC tag and open its notification, or open SpoolBud and scan a spool QR.
+2. On the selected-spool page, choose a destination button, enter a location, tap a destination NFC tag, or scan its QR.
+3. SpoolBud updates Spoolman, confirms the move, and clears the browser's spool selection after success. Failed moves retain the selection so you can check and retry.
 
-This fits the workflow where bins are encoded as stable labels and spool selection is remembered in a browser cookie.
+Existing `/scan?value=...` links without `stay=1` and `/bin/<location>` links without `stay=1` still redirect to Spoolman. Opening a bin with no selected spool shows its contents.
+
+Spool selection is stored in a browser cookie. Use the same SpoolBud hostname and browser profile for both taps/scans; private browsing and different browsers have separate selections. Use **Cancel selection** to discard an unfinished move. Destination buttons and the in-page QR scanner check the spool ID shown on the page to reject stale selections.
 
 ## Why this exists
 
@@ -21,14 +19,16 @@ This service solves that by routing spool scans through `/scan`, storing the sel
 
 - `GET /healthz` — health probe
 - `GET /status` — current selected spool for this browser session
-- `GET /scan?value=<spool_url_or_id_or_spoolman_payload>[&stay=1]` — parse spool ID, set cookie, then either redirect to Spoolman (default) or stay in SpoolBud with an in-page bin scanner
+- `GET /scan?value=<spool_url_or_id_or_spoolman_payload>[&stay=1]` — parse spool ID, set cookie, then either redirect to Spoolman (default) or stay in SpoolBud with a destination picker and optional QR scanner
   - When `stay=1` is used, the selected-spool page also shows the spool name/details returned by Spoolman when available.
 - `GET /select/{spool_id}` — manual fallback spool selection (for old direct Spoolman QR labels)
-- `GET /bin/{location}` — update selected spool location in Spoolman and redirect to the spool page, or show current bin contents if no spool is selected
-- `GET /bins` — interactive QR label page for bin labels
-- `GET /spools` — interactive QR label page for Spoolman-compatible payloads or full SpoolBud `/scan` URLs
-- `GET /api/bins?source=default|spoolman` — fetch bin list from defaults or by scraping locations from Spoolman
-- `GET /api/spools` — fetch spool IDs from Spoolman for the spool label generator
+- `GET /bin/{location}[?stay=1]` — move the selected spool, or show bin contents without a selection. `stay=1` shows confirmation in SpoolBud; omission preserves the Spoolman redirect. Optional `spool_id` checks the expected selection for in-page QR scans. Location names may include spaces and slashes; URL-encode the entire name.
+- `POST /api/move` — JSON `{ "spool_id": 42, "location": "F-001" }`; checks the selected cookie, updates Spoolman, and clears selection on success. Returns JSON with the spool ID and normalized location; mismatched selection returns 409.
+- `POST /api/selection/clear` — JSON `{ "spool_id": 42 }`; cancels only the matching selection
+- `GET /bins` — destination QR labels and NFC links
+- `GET /spools` — searchable spool tag preparation with NFC links and either Spoolman-compatible QR payloads or full SpoolBud URLs
+- `GET /api/bins?source=default|spoolman|all` — fetch defaults, used Spoolman locations, or configured/default destinations combined with used locations. `all` returns a warning and the configured/default list if Spoolman is unavailable.
+- `GET /api/spools` — returns existing `spool_ids` plus `spools` summaries with description, color, and locations for tag preparation
 - `GET /qr.svg?value=<url_or_text>` — render QR code SVG for labels
 
 ## Environment variables
@@ -36,6 +36,7 @@ This service solves that by routing spool scans through `/scan`, storing the sel
 - `SPOOLMAN_BASE` (default `https://filament.igetno.net`)
 - `SPOOLMAN_API_TOKEN` (optional bearer token)
 - `COOKIE_NAME` (default `last_spool_id`)
+- `DESTINATIONS` (optional comma- or newline-separated names, e.g. `F-001,F-002,PRINTER-1`). These remain selectable even when empty. If unset, the picker uses built-in defaults plus used Spoolman locations. Names are trimmed and uppercased, matching existing bin behavior. Restart the service after changing configuration; editing the label-page text does not persist destinations.
 
 ## Local development
 
@@ -55,50 +56,52 @@ docker compose up --build
 
 Service is available at <http://localhost:8010>.
 
-## Bin QR label generator
+## Prepare a new spool and write its NFC tag
 
-Open <http://localhost:8010/bins> to:
+1. Create each physical spool in Spoolman, choosing its filament and entering its details. Two identical rolls need separate spool records.
+2. Open `/spools` in SpoolBud and choose **Load from Spoolman**. Search the loaded labels by ID, manufacturer, material, color, or location. Refresh this list after creating another spool.
+3. Check the spool details and public SpoolBud base URL, then choose **Copy NFC link**. If clipboard access is unavailable, manually copy the visible selected link.
+4. In NFC Tools on the iPhone: **Write → Add a record → URL/URI**, paste the link, then **Write** and hold the phone near the sticker. Use one website record; replace any old record when reusing a writable sticker.
+5. Leave the writing screen, tap the tag, and open the notification. Verify the expected spool in SpoolBud before attaching the sticker, then choose its destination.
 
-- load default bins (`F-001..F-020` and `B-001..B-004`)
-- scrape currently used location names from the configured Spoolman instance
-- render printable QR labels that point to `https://<your-spoolbud-host>/bin/<location>`
-- use the built-in top navigation and light/dark theme toggle while working on a phone or desktop browser
+SpoolBud prepares links; the writing app performs the physical NFC write. Copying a link is not proof that a tag was written, so always perform the tap-back check. No tag UID registration, native app, or additional database is required for this URL flow. External readers that send tag UIDs and filament-data tag formats are not supported by this change.
 
-## Spoolman-compatible spool labels
+The tag identifies the spool; filament details and current location remain in Spoolman. Moving the spool does not require rewriting its tag. A replacement tag uses the same link. Reusing a writable sticker for a new roll requires a new spool record and overwriting the link with that new ID.
 
-Open <http://localhost:8010/spools> to generate spool QR labels in Spoolman's scanner format:
+Example NFC link (also the default full-URL QR format):
 
-- accepts raw spool IDs plus Spoolman spool URLs pasted one per line
-- can pull spool IDs directly from Spoolman with one tap
-- renders either QR payloads like `web+spoolman:s-42` **or** full SpoolBud links like `/scan?...&stay=1`
-- gives you a matching SpoolBud `/select/<spool_id>` link under each label for manual fallback
+```text
+https://spoolbud.example.net/scan?value=42&stay=1
+```
 
-## QR formats
+Use your stable, phone-accessible HTTPS SpoolBud hostname. Both SpoolBud and the phone need access to their configured services. The selected-spool screen does not automatically start the camera; **Open bin scanner** is optional. QR scanning uses native barcode detection when available and a compatibility decoder otherwise.
 
-### Recommended spool QR format
+## Prepare destination tags and QR labels
+
+Open `/bins` to load configured/default destinations plus used Spoolman locations, or enter names one per line. **Render labels** produces matching printable QR codes and **Copy NFC link** buttons. Buckets and printer positions use the same location field in Spoolman.
+
+```text
+https://spoolbud.example.net/bin/F-001?stay=1
+https://spoolbud.example.net/bin/PRINTER%20%2F%20LEFT?stay=1
+```
+
+Write each link as a URL/URI record using the same steps as spool tags. Cancel any active spool selection before testing a destination tag if you only want to inspect the bin: opening a destination link with a selected spool performs a move.
+
+## Existing QR labels
+
+Existing bin links keep working without changes:
+
+```text
+https://spoolbud.example.net/bin/F-001
+```
+
+The spool preparation page still offers Spoolman's scanner payload format:
 
 ```text
 web+spoolman:s-42
 ```
 
-Open SpoolBud, tap `Scan spool QR`, and scan that payload to stay in the helper flow.
-
-Direct SpoolBud links are still supported when you want a QR code to jump straight into the helper:
-
-```text
-https://spoolbud.example.net/scan?value=https://filament.example.net/spool/show/42&stay=1
-```
-
-(On iPhone browsers, `stay=1` now uses a compatibility scanner automatically when native barcode detection is unavailable.)
-
-(Also supports numeric-only IDs such as `?value=42`.)
-
-### Bin QR format
-
-```text
-https://spoolbud.example.net/bin/F-001
-https://spoolbud.example.net/bin/B-004
-```
+Scan that payload using SpoolBud's homepage camera scanner. NFC links always use full SpoolBud URLs, regardless of the QR format selected. Spool URLs such as `/spool/show/42`, `/spool/42`, query values such as `?spool_id=42`, and numeric IDs remain supported. The `/select/42` fallback remains available.
 
 ## CI/CD
 
