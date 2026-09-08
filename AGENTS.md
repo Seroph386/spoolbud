@@ -1,86 +1,85 @@
-# AGENTS.md — SpoolBud Helper Guidance
+# AGENTS.md — SpoolBud Architecture and Agent Guidance
 
-This file provides guiding principles for AI/code agents extending this repository.
-Its scope is the entire repo.
+Scope: the entire repository. Read this before implementing changes.
 
-## Product intent
+## Product intent and ownership
 
-SpoolBud is a minimal companion service for Spoolman with a two-scan workflow:
-1. **Spool scan** selects a spool (`/scan`), stores selection in a cookie, and redirects to Spoolman.
-2. **Bin scan** updates location (`/bin/{location}`) for the selected spool.
-3. **Label generation** can be done via `/bins` and `/qr.svg` (optionally sourced from Spoolman via `/api/bins?source=spoolman`).
+SpoolBud is a lightweight physical filament workflow UI for Spoolman 0.27+.
+Spoolman is authoritative for spool inventory, filament metadata, locations, and
+NFC/RFID tag associations. SpoolBud selects a spool and coordinates explicit
+physical actions such as moving/storing it. Printer stations and load/unload
+workflows are future extensions of this boundary.
 
-Design for low-friction phone use with stable QR labels and simple operational deployment.
+## Identity and state rules
 
-## Core architecture concepts
+- Resolve every new NFC/RFID scan by forwarding its hardware UID to Spoolman's
+  `POST /api/v1/tag/scan`. Only the returned `matched_spool_id` selects a spool.
+- Never infer a spool ID from a UID, tag payload, reader ID, or a client-supplied
+  match. Never maintain a local UID-to-spool map, cache, or tag database.
+- Do not encode Spoolman IDs into NFC tags or offer NFC tag-writing workflows.
+  Create spools and link/unlink/reassign their tags in Spoolman.
+- An unknown tag or failed resolution must not leave an older spool selected
+  for an accidental move. Show an actionable result; never silently fall back
+  from NFC to QR parsing or create inventory/tag associations automatically.
+- Browser selection is transient workflow context. Retain the existing cookie
+  for compatibility, storing only the selected canonical spool ID. It is not
+  an inventory or tag-association store and is not authentication.
+- No new persistent database, global selected-spool state, or background queue.
+  A device request does not select an unrelated browser: session handoff must
+  be explicit. Reader identity is metadata, not browser identity or a secret.
 
-- Backend: a single FastAPI app (`app.py`).
-- State: browser cookie (`COOKIE_NAME`) storing selected spool id.
-- Integration: Spoolman API update is done server-side via `PATCH /api/v1/spool/{id}`.
-- Runtime: containerized Python service (`Dockerfile`) and `docker-compose.yml`.
-- Delivery: CI validates tests/build; publish workflow pushes images on merges/pushes to `main`.
+## Boundaries
 
-## Engineering principles
+- Keep FastAPI routes and mobile UI thin. Reuse selection, metadata, and action
+  helpers for NFC and compatibility QR entry points.
+- Isolate the Spoolman tag HTTP contract and its response validation. Pass
+  canonical spool IDs to downstream workflows, never hardware UIDs/payloads.
+- Moves/storage update Spoolman's location through its API. Local destination
+  configuration and legacy defaults are shortcuts, not authoritative state;
+  successful location changes must be confirmed by Spoolman.
+- Printer load/unload is distinct from storage/location updates. Keep a small
+  vendor-neutral interface for station/slot identifiers and canonical spool
+  IDs. FilaBridge/Moonraker/vendor APIs belong in future adapters, not in scan
+  parsing, tag resolution, or generic move routes. Do not pretend that setting
+  a location loads a printer, or expose working load/unload controls before an
+  adapter and its failure/reconciliation behavior exist.
 
-1. **Keep it minimal**
-   - Avoid unnecessary frameworks, databases, or background services.
-   - Prefer straightforward functions/endpoints over abstraction layers.
+## Compatibility and operations
 
-2. **Preserve scan ergonomics**
-   - Never break `/scan?value=...` and `/bin/{location}` URL contracts.
-   - Maintain support for these spool value forms in `extract_spool_id`:
-     - full `/spool/<id>` URL
-     - `?spool_id=<id>` query value
-     - raw numeric id
+- Preserve `/scan?value=...`, `/select/{spool_id}`, `/bin/{location}`, `/status`,
+  `/healthz`, spool QR scanning, and printable bin QR labels.
+- QR parsing continues to support `/spool/show/<id>`, `/spool/<id>`,
+  `?spool_id=<id>`, numeric IDs, and `web+spoolman:s-<id>`.
+- Previously written ID-based URL tags may still open the legacy scan route;
+  document them as compatibility links, not the new NFC identity model.
+- Scanning selects only. New moves require an explicit user action. Keep legacy
+  bin-link move behavior during migration, including its redirect semantics.
+- Retain selection after failed moves; clear it on successful moves or cancel.
+  Reject stale action requests when the selected spool has changed.
+- Credentials come only from environment variables. Do not log tokens or raw
+  tag payloads; never expose upstream credentials/errors to the UI.
+- Escape user-controlled HTML and render browser labels with safe DOM APIs.
+- Keep the container small and boot fast. Prefer simple functions and standard
+  library types; add dependencies or abstractions only for concrete needs.
 
-3. **Fail clearly for operators**
-   - Return actionable HTML/JSON messages for missing spool selection or Spoolman failures.
-   - Keep error messages understandable to a non-developer scanning on a phone.
+## Phased changes and verification
 
-4. **Security and safety defaults**
-   - Read credentials only from environment variables.
-   - Do not log API tokens or secrets.
-   - Escape user-controlled content rendered in HTML responses.
+Implement small reviewable phases with tests and docs updated in each phase.
+Update this file before changing these ownership or integration boundaries.
+For endpoint changes update `tests/`, `README.md`, and workflow/QR examples.
+For environment changes also update `docker-compose.yml` and CI assumptions.
 
-5. **Compatibility first**
-   - Do not require users to regenerate all labels immediately.
-   - Keep `/select/{spool_id}` fallback available unless replaced by an explicit migration plan.
+Cover matched/unknown tags, malformed Spoolman responses, upstream errors,
+no local matching, session isolation, stale selections, and unchanged QR/bin
+contracts. Exercise the actual HTTP request/response boundary with mocked
+transport. Test printer boundaries with fake adapters, never real printers.
+Use mock inventory for browser tests; report actual hardware testing separately.
 
-6. **Operational reliability**
-   - Keep `/healthz` stable for health checks.
-   - Ensure Docker image remains small and fast to boot.
-   - CI must continue to validate unit tests + container build behavior.
+Run when feasible:
 
-## Change guidelines
-
-- If endpoint behavior changes, update:
-  - tests in `tests/test_app.py`
-  - docs in `README.md`
-  - QR examples and workflow notes
-- If environment variables change, update:
-  - `README.md`
-  - `docker-compose.yml`
-  - any CI assumptions
-- Prefer additive migrations over breaking changes.
-
-## Testing expectations
-
-At minimum, maintain or improve coverage for:
-- spool ID parsing variants
-- `/scan` redirect + cookie set
-- `/bin` behavior when no selected spool exists
-- `/status` cookie reflection
-
-When feasible, run locally:
 - `pytest -q`
 - `docker compose config -q`
 - `docker build -t spoolbud:test .`
 
-## Non-goals (unless explicitly requested)
-
-- Full user auth system
-- Persistent database state
-- Frontend SPA/dashboard replacement
-- Complex queueing or async job processing
-
-Keep the service focused on fast, reliable QR-driven spool location updates.
+No full authentication system, persistent inventory mirror, frontend SPA,
+or printer-vendor implementation is part of this migration.
