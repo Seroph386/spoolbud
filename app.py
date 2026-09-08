@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import ValidationError
 
 from spoolbud.config import settings
+from spoolbud.parsing.spool_ids import extract_spool_id
 from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
 # Compatibility aliases remain while responsibilities move into the package.
@@ -22,14 +23,6 @@ COOKIE_MAX_AGE = settings.cookie_max_age
 DESTINATIONS = settings.destinations
 
 app = FastAPI(title="SpoolBud Helper")
-
-SPOOL_ID_PATTERNS = [
-    r"(?i)web\+spoolman:s-(\d+)",
-    r"/spool/show/(\d+)",
-    r"/spool/(\d+)",
-    r"[?&]spool_id=(\d+)",
-    r"^(\d+)$",
-]
 
 LOCATION_KEYS = ("location", "bin", "storage_location")
 EXTRA_LOCATION_KEYS = ("location", "bin")
@@ -1124,18 +1117,6 @@ def wants_scan_stay(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def extract_spool_id(value: str | None) -> int | None:
-    if not value:
-        return None
-
-    raw_value = value.strip()
-    for pattern in SPOOL_ID_PATTERNS:
-        match = re.search(pattern, raw_value)
-        if match:
-            return int(match.group(1))
-    return None
 
 
 def spool_url(spool_id: int) -> str:
