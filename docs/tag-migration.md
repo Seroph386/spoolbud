@@ -67,3 +67,16 @@ uncertain results without retry. README specifies the responsibilities of a
 future FilaBridge or other adapter and of future session-aware action routes.
 All 87 tests pass, including fake-adapter dispatch and failure coverage. No real
 printer action, printer endpoint, or new persistent state has been introduced.
+
+## Final validation
+
+The tag request model requires Pydantic 2, now declared explicitly in runtime
+requirements instead of relying on FastAPI's broader transitive requirement.
+Reader ID validation stays on the server so invalid submissions clear the old
+selection through the same error path as other invalid scans.
+
+The full 87-test suite and embedded JavaScript syntax checks pass. Compose
+configuration validation passes. The container build could not run because the
+local Docker daemon is stopped; it still needs verification in CI or with Docker
+running. Browser checks used mock inventory, not a live Spoolman server or
+physical NFC/RFID reader.

@@ -1453,7 +1453,7 @@ def home(request: Request) -> HTMLResponse:
             <input id="tagUid" class="input" required maxlength="128" autocomplete="off" spellcheck="false" placeholder="04:A2:B3:C4:D5:E6:F7" />
           </label>
           <label>Reader ID (optional)
-            <input id="tagReaderId" class="input" maxlength="64" pattern="[A-Za-z0-9._:-]+" autocomplete="off" placeholder="desk-reader" />
+            <input id="tagReaderId" class="input" maxlength="64" autocomplete="off" placeholder="desk-reader" />
           </label>
           <button id="submitTagScan" class="button" type="submit">Find spool in Spoolman</button>
         </form>
