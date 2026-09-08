@@ -4,6 +4,25 @@ SpoolBud is a lightweight UI for selecting and moving/storing filament spools.
 Spoolman 0.27+ owns inventory, metadata, locations, and NFC/RFID tag associations.
 SpoolBud has no tag database, inventory mirror, or NFC writer.
 
+## Internal architecture
+
+`app.py` is only the Uvicorn entry point. Application assembly lives in
+`spoolbud/application.py`, which registers feature routers from
+`spoolbud/routes/`. Route modules validate requests and coordinate work; they do
+not contain page markup or direct HTTP calls.
+
+- `spoolbud/clients/spoolman.py` owns Spoolman URLs, authentication headers,
+  timeouts, HTTP requests, and tag response validation.
+- `spoolbud/parsing/spool_ids.py` owns compatibility spool-reference parsing.
+- `spoolbud/services/` owns cookie selection, bin workflows, and QR generation.
+- `spoolbud/rendering/` owns HTML components, complete page rendering, CSS, and
+  browser scripts.
+- `spoolbud/dependencies.py` provides the small runtime boundary used by routes,
+  keeping client and workflow substitutions straightforward in tests.
+
+The package introduces no new runtime service or persistence. Uvicorn still
+loads `app:app`, and all existing URLs and environment variables remain valid.
+
 1. Open SpoolBud. Use a reader to enter a tag UID, or scan a compatibility spool QR.
 2. Tag scans are resolved by Spoolman's `POST /api/v1/tag/scan`. Only its
    `matched_spool_id` becomes the selected spool.

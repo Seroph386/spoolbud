@@ -30,10 +30,21 @@ workflows are future extensions of this boundary.
 
 ## Boundaries
 
-- Keep FastAPI routes and mobile UI thin. Reuse selection, metadata, and action
-  helpers for NFC and compatibility QR entry points.
-- Isolate the Spoolman tag HTTP contract and its response validation. Pass
-  canonical spool IDs to downstream workflows, never hardware UIDs/payloads.
+- Keep `app.py` limited to creating/exposing the FastAPI application and
+  compatibility imports. Register new endpoints through feature routers in
+  `spoolbud/routes/`; do not rebuild a monolithic entry-point module.
+- Keep route modules thin: validate HTTP input, invoke clients/services, and
+  select a response. Put Spoolman HTTP calls only in
+  `spoolbud/clients/spoolman.py`, business rules in `spoolbud/services/`, spool
+  reference parsing in `spoolbud/parsing/`, and HTML/CSS/JavaScript in
+  `spoolbud/rendering/`.
+- Reuse `spoolbud/dependencies.py` as the route-facing runtime boundary instead
+  of constructing HTTP clients throughout the application. Keep it small and
+  avoid a configuration or dependency-injection framework.
+- Isolate the Spoolman tag HTTP contract and its response validation in the
+  existing client. Pass canonical spool IDs to downstream workflows, never
+  hardware UIDs/payloads. Future NFC work must build on these boundaries rather
+  than placing tag logic or page markup in routes.
 - Moves/storage update Spoolman's location through its API. Local destination
   configuration and legacy defaults are shortcuts, not authoritative state;
   successful location changes must be confirmed by Spoolman.

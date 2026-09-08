@@ -80,6 +80,14 @@ def test_home_page_exposes_spool_scanner():
     assert "web+spoolman:s-42" in resp.text
 
 
+def test_healthz_contract_is_stable():
+    with create_client() as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "spoolman_base": spoolbud_app.SPOOLMAN_BASE}
+
+
 def test_bin_without_cookie_shows_bin_contents(monkeypatch):
     async def fake_fetch(location: str):
         assert location == "F-001"
