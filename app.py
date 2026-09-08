@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from spoolbud.config import settings
 from spoolbud.clients.spoolman import SpoolmanClient
 from spoolbud.parsing.spool_ids import extract_spool_id
+from spoolbud.services.spool_selection import clear_selected_spool, get_selected_spool, set_selected_spool
 from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
 # Compatibility aliases remain while responsibilities move into the package.
@@ -1189,9 +1190,7 @@ def spool_summary(spool: dict[str, Any]) -> str:
 
 
 def selected_spool_id(request: Request | None) -> int | None:
-    if request is None:
-        return None
-    return extract_spool_id(request.cookies.get(COOKIE_NAME, ""))
+    return get_selected_spool(request, cookie_name=COOKIE_NAME, parser=extract_spool_id)
 
 
 def spool_color_hex(spool: dict[str, Any]) -> str | None:
@@ -1353,13 +1352,11 @@ async def move_selected_spool(request: Request, spool_id: int, location: str) ->
 
 
 def clear_selection(response: Response) -> Response:
-    response.delete_cookie(COOKIE_NAME, samesite="Lax")
-    return response
+    return clear_selected_spool(response, cookie_name=COOKIE_NAME)
 
 
 def set_selection(response: Response, spool_id: int) -> Response:
-    response.set_cookie(COOKIE_NAME, str(spool_id), max_age=COOKIE_MAX_AGE, samesite="Lax")
-    return response
+    return set_selected_spool(response, spool_id, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE)
 
 
 @app.post("/api/tag/scan")
