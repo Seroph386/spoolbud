@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import io
 import re
 from html import escape
 from typing import Any
 
 import httpx
-import segno
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import ValidationError
@@ -15,6 +13,7 @@ from spoolbud.config import settings
 from spoolbud.clients.spoolman import SpoolmanClient
 from spoolbud.parsing.spool_ids import extract_spool_id
 from spoolbud.services.spool_selection import clear_selected_spool, get_selected_spool, set_selected_spool
+from spoolbud.services.qr import render_qr_svg
 from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
 # Compatibility aliases remain while responsibilities move into the package.
@@ -1687,10 +1686,7 @@ async def api_spools():
 
 @app.get("/qr.svg")
 def qr_svg(value: str = Query(min_length=1, max_length=2048)) -> Response:
-    qr = segno.make(value)
-    buffer = io.BytesIO()
-    qr.save(buffer, kind="svg", scale=7, border=2)
-    return Response(buffer.getvalue(), media_type="image/svg+xml")
+    return Response(render_qr_svg(value), media_type="image/svg+xml")
 
 
 @app.get("/bins", response_class=HTMLResponse)
