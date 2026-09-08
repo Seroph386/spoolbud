@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 import re
 from html import escape
 from typing import Any
@@ -12,13 +11,15 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
+from spoolbud.config import settings
 from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
-SPOOLMAN_BASE = os.getenv("SPOOLMAN_BASE", "https://filament.igetno.net").rstrip("/")
-API_TOKEN = os.getenv("SPOOLMAN_API_TOKEN", "")
-COOKIE_NAME = os.getenv("COOKIE_NAME", "last_spool_id")
-COOKIE_MAX_AGE = 60 * 60 * 24 * 30
-DESTINATIONS = os.getenv("DESTINATIONS", "")
+# Compatibility aliases remain while responsibilities move into the package.
+SPOOLMAN_BASE = settings.spoolman_base
+API_TOKEN = settings.spoolman_api_token
+COOKIE_NAME = settings.cookie_name
+COOKIE_MAX_AGE = settings.cookie_max_age
+DESTINATIONS = settings.destinations
 
 app = FastAPI(title="SpoolBud Helper")
 

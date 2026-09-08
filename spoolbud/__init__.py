@@ -1,0 +1,1 @@
+"""SpoolBud application package."""
