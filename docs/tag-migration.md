@@ -57,3 +57,13 @@ All 75 tests pass. Browser verification with a mock upstream covered keyboard
 UID submission, selection, explicit storage, unknown tags clearing a previous
 selection, and QR label generation. Embedded JavaScript syntax checks passed.
 Physical Web NFC and external reader hardware still require a deployment pilot.
+
+## Phase 3 result
+
+Added the small `PrinterIntegration` protocol and explicit load/unload dispatcher
+in `printer_workflows.py`, independently of tag resolution and storage updates.
+It rejects invalid identities/targets, fails without an adapter, and propagates
+uncertain results without retry. README specifies the responsibilities of a
+future FilaBridge or other adapter and of future session-aware action routes.
+All 87 tests pass, including fake-adapter dispatch and failure coverage. No real
+printer action, printer endpoint, or new persistent state has been introduced.

@@ -168,3 +168,22 @@ Repository-level AI agent guidance lives in `AGENTS.md` (principles, architectur
 
 
 Review the implementation phases in [docs/tag-migration.md](docs/tag-migration.md).
+
+## Future printer stations and load/unload
+
+`printer_workflows.py` defines `PrinterIntegration.load_spool` and
+`unload_spool`, plus an explicit dispatcher. Calls carry a canonical Spoolman
+spool ID, station ID, and optional slot ID. No UID, tag payload, or location name
+is used to infer a printer target. No concrete adapter, printer endpoint, or
+load/unload UI is enabled yet; a missing adapter fails explicitly.
+
+A future FilaBridge or other adapter owns its transport, environment credentials,
+station/slot mapping, and confirmation/error handling. It must verify the
+expected loaded spool before unloading, return only after confirmed success,
+and report uncertain results for reconciliation. Future action routes must
+check the browser's current selection before dispatch. They must retain it on
+failure and reconcile partial operations before claiming a combined load/store
+success. The dispatcher neither retries nor changes Spoolman inventory.
+
+Moves/storage remain independent Spoolman location updates. New printer
+adapters should be separately reviewed and tested against fake hardware first.

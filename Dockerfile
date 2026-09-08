@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py spoolman_tags.py ./
+COPY app.py spoolman_tags.py printer_workflows.py ./
 
 EXPOSE 8000
 
