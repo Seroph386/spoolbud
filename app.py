@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import ValidationError
 
 from spoolbud.config import settings
+from spoolbud.clients.spoolman import SpoolmanClient
 from spoolbud.parsing.spool_ids import extract_spool_id
 from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
@@ -1138,10 +1139,7 @@ def configured_bins() -> list[str]:
 
 
 def auth_headers() -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
-    if API_TOKEN:
-        headers["Authorization"] = f"Bearer {API_TOKEN}"
-    return headers
+    return SpoolmanClient(SPOOLMAN_BASE, API_TOKEN).auth_headers()
 
 
 def spool_location_values(spool: dict[str, Any]) -> set[str]:
@@ -1311,19 +1309,11 @@ def render_spool_cards(spools: list[dict[str, Any]], *, compact: bool = False) -
 
 
 async def fetch_spoolman_spools() -> list[dict[str, Any]]:
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        response = await client.get(f"{SPOOLMAN_BASE}/api/v1/spool", headers=auth_headers())
-        response.raise_for_status()
-        payload = response.json()
-        return payload if isinstance(payload, list) else []
+    return await SpoolmanClient(SPOOLMAN_BASE, API_TOKEN).get_spools()
 
 
 async def fetch_spoolman_spool(spool_id: int) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        response = await client.get(f"{SPOOLMAN_BASE}/api/v1/spool/{spool_id}", headers=auth_headers())
-        response.raise_for_status()
-        payload = response.json()
-        return payload if isinstance(payload, dict) else {}
+    return await SpoolmanClient(SPOOLMAN_BASE, API_TOKEN).get_spool(spool_id)
 
 
 async def fetch_spoolman_locations() -> list[str]:
@@ -1341,12 +1331,7 @@ async def fetch_spools_in_location(location: str) -> list[dict[str, Any]]:
 
 
 async def patch_spool_location(spool_id: int, location: str) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        return await client.patch(
-            f"{SPOOLMAN_BASE}/api/v1/spool/{spool_id}",
-            headers=auth_headers(),
-            json={"location": location},
-        )
+    return await SpoolmanClient(SPOOLMAN_BASE, API_TOKEN).update_spool_location(spool_id, location)
 
 
 def require_selection(request: Request, expected_spool_id: int) -> None:
