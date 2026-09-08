@@ -44,3 +44,16 @@ input/responses, upstream errors, and the 34 compatibility tests. Docker now
 copies the integration module. The source API was checked directly because the
 published generated OpenAPI reference did not include the tag endpoints:
 [upstream tag.py](https://github.com/Donkie/Spoolman/blob/master/spoolman/api/v1/tag.py).
+
+## Phase 2 result
+
+The home page accepts reader-entered/pasted UIDs and offers read-only Web NFC
+when supported. NFC responses navigate to `/selected`, which reads workflow
+context without parsing QR data or reselecting an ID. Legacy QR URLs reuse the
+same action renderer. NFC-writing controls and instructions have been removed;
+Spoolman linking and iPhone/session limitations are documented in README.
+
+All 75 tests pass. Browser verification with a mock upstream covered keyboard
+UID submission, selection, explicit storage, unknown tags clearing a previous
+selection, and QR label generation. Embedded JavaScript syntax checks passed.
+Physical Web NFC and external reader hardware still require a deployment pilot.

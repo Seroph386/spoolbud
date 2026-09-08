@@ -519,11 +519,11 @@ function labelBase(value) {
   return url.href.replace(/\/$/, "");
 }
 
-function spoolTagLink(base, id) {
+function spoolScanLink(base, id) {
   return `${base}/scan?value=${encodeURIComponent(id)}&stay=1`;
 }
 
-function createLabelCard(title, qrValue, nfcLink, description = "", color = null) {
+function createLabelCard(title, qrValue, description = "", color = null) {
   const card = document.createElement("article");
   card.className = "card qr-card stack";
   const heading = document.createElement("h3");
@@ -543,28 +543,7 @@ function createLabelCard(title, qrValue, nfcLink, description = "", color = null
   qr.src = `/qr.svg?value=${encodeURIComponent(qrValue)}`;
   const payload = document.createElement("code");
   payload.textContent = qrValue;
-  const input = document.createElement("input");
-  input.className = "input";
-  input.readOnly = true;
-  input.value = nfcLink;
-  input.setAttribute("aria-label", `NFC link for ${title}`);
-  const copy = document.createElement("button");
-  copy.className = "button";
-  copy.type = "button";
-  copy.textContent = "Copy NFC link";
-  const status = document.createElement("div");
-  status.setAttribute("role", "status");
-  copy.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(nfcLink);
-      status.textContent = "Link copied. Paste it as a URL/URI record in your NFC writer.";
-    } catch (_) {
-      input.focus();
-      input.select();
-      status.textContent = "Copy the selected link manually, then paste it into your NFC writer.";
-    }
-  });
-  card.append(heading, details, qr, payload, input, copy, status);
+  card.append(heading, details, qr, payload);
   return card;
 }
 """
@@ -595,9 +574,9 @@ BINS_PAGE_SCRIPT = r"""
       gridEl.replaceChildren();
       for (const location of locations) {
         const target = `${base}/bin/${encodeURIComponent(location)}?stay=1`;
-        gridEl.appendChild(createLabelCard(location, target, target));
+        gridEl.appendChild(createLabelCard(location, target));
       }
-      statusEl.textContent = `Prepared ${locations.length} destination labels and NFC links.`;
+      statusEl.textContent = `Prepared ${locations.length} destination QR labels.`;
     } catch (error) {
       statusEl.textContent = error.message;
     }
@@ -632,20 +611,20 @@ SPOOLS_PAGE_SCRIPT = r"""
       gridEl.replaceChildren();
       for (const id of ids) {
         const spool = spools.get(Number(id));
-        const nfcLink = spoolTagLink(base, id);
+        const scanLink = spoolScanLink(base, id);
         const fullUrl = document.getElementById("spoolQrFormat").value === "full-url";
         const stay = document.getElementById("includeStayFlag").checked;
-        const qrValue = fullUrl ? (stay ? nfcLink : nfcLink.replace("&stay=1", "")) : `web+spoolman:s-${id}`;
+        const qrValue = fullUrl ? (stay ? scanLink : scanLink.replace("&stay=1", "")) : `web+spoolman:s-${id}`;
         const description = spool ? `${spool.description} · Location: ${spool.locations.join(", ") || "Unassigned"}` : "";
-        const card = createLabelCard(`Spool ${id}`, qrValue, nfcLink, description, spool?.color_hex);
+        const card = createLabelCard(`Spool ${id}`, qrValue, description, spool?.color_hex);
         const select = document.createElement("a");
-        select.href = spoolTagLink(window.location.origin, id);
+        select.href = spoolScanLink(window.location.origin, id);
         select.textContent = "Select in SpoolBud";
         card.appendChild(select);
         gridEl.appendChild(card);
       }
       filterLabels();
-      statusEl.textContent = `Prepared ${ids.length} spool labels and NFC links. Verify each written tag before attaching it.`;
+      statusEl.textContent = `Prepared ${ids.length} spool QR labels.`;
     } catch (error) {
       statusEl.textContent = error.message;
     }
@@ -911,6 +890,92 @@ function createQrScanner(config) {
 """
 
 
+TAG_SCAN_PAGE_SCRIPT = r"""
+(() => {
+  const form = document.getElementById("tagScanForm");
+  const uid = document.getElementById("tagUid");
+  const readerId = document.getElementById("tagReaderId");
+  const status = document.getElementById("tagScanStatus");
+  const submit = document.getElementById("submitTagScan");
+  const read = document.getElementById("readNfc");
+  const stop = document.getElementById("stopNfc");
+  let controller = null;
+  let busy = false;
+
+  function stopReading() {
+    controller?.abort();
+    controller = null;
+    read.disabled = busy;
+    stop.hidden = true;
+  }
+
+  async function resolveUid(value) {
+    if (busy) return;
+    busy = true;
+    stopReading();
+    submit.disabled = true;
+    for (const id of ["currentSelection", "continueSelection"]) {
+      const previous = document.getElementById(id);
+      if (previous) previous.hidden = true;
+    }
+    status.textContent = "Asking Spoolman to identify the tag...";
+    try {
+      const body = {uid: value};
+      if (readerId.value.trim()) body.reader_id = readerId.value.trim();
+      const result = await requestJson("/api/tag/scan", body);
+      if (result.matched_spool_id !== null) {
+        window.location.href = "/selected";
+        return;
+      }
+      status.textContent = result.detail;
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      busy = false;
+      submit.disabled = false;
+      read.disabled = false;
+      uid.select();
+    }
+  }
+
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    resolveUid(uid.value.trim());
+  });
+  read.hidden = !(window.isSecureContext && "NDEFReader" in window);
+  read.addEventListener("click", async () => {
+    if (busy || controller) return;
+    controller = new AbortController();
+    const signal = controller.signal;
+    read.disabled = true;
+    stop.hidden = false;
+    try {
+      const reader = new NDEFReader();
+      reader.onreading = event => {
+        if (signal.aborted) return;
+        // Use the hardware serial only. Never inspect NDEF records for IDs.
+        uid.value = event.serialNumber || "";
+        resolveUid(uid.value);
+      };
+      reader.onreadingerror = () => {
+        if (!signal.aborted) resolveUid("");
+      };
+      await reader.scan({signal});
+      if (!signal.aborted) status.textContent = "Hold a supported NFC tag near the phone.";
+    } catch (error) {
+      if (error.name !== "AbortError") status.textContent = "Could not start NFC reading. Check permissions and hardware, or use a reader to enter the UID.";
+      stopReading();
+    }
+  });
+  stop.addEventListener("click", () => {
+    stopReading();
+    status.textContent = "NFC reading stopped.";
+  });
+  window.addEventListener("pagehide", stopReading);
+})();
+"""
+
+
 HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
 (() => {
   createQrScanner({
@@ -934,7 +999,7 @@ HOME_SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
         return null;
       }
       return {
-        url: spoolTagLink(window.location.origin, parseSpoolId(rawValue)),
+        url: spoolScanLink(window.location.origin, parseSpoolId(rawValue)),
         status: "Spool scanned. Choose a destination...",
       };
     },
@@ -998,7 +1063,7 @@ SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
     filterDestinations();
     destinationStatus.textContent = data.warning || "Choose a bucket or printer position below.";
   }).catch(() => {
-    destinationStatus.textContent = "Could not load destinations. Enter a location below or tap its tag.";
+    destinationStatus.textContent = "Could not load destinations. Enter a location below or scan its bin QR.";
   });
   search.addEventListener("input", filterDestinations);
   document.getElementById("destinationForm").addEventListener("submit", event => {
@@ -1364,7 +1429,7 @@ def cancel_selection(request: Request, spool_id: int = Body(embed=True, gt=0)):
 def home(request: Request) -> HTMLResponse:
     current_spool_id = selected_spool_id(request)
     current_spool_markup = (
-        f'<span class="chip">Selected spool: <strong>{current_spool_id}</strong></span>' if current_spool_id else ""
+        f'<span id="currentSelection" class="chip">Selected spool: <strong>{current_spool_id}</strong></span>' if current_spool_id else ""
     )
     body = f"""
     <main class="stack">
@@ -1375,9 +1440,30 @@ def home(request: Request) -> HTMLResponse:
         </div>
         <div>
           <h1>Select a spool, then choose its destination</h1>
-          <p class="muted">Tap a spool NFC tag and open its notification, or scan a spool QR below. Then choose a bucket onscreen, tap a destination tag, or scan its QR.</p>
-          {f'<p><a class="button" href="/scan?value={current_spool_id}&amp;stay=1">Continue with spool {current_spool_id}</a></p>' if current_spool_id else ""}
+          <p class="muted">Scan a tag through Spoolman or use a spool QR. Then move or store the selected spool using a destination button or bin QR.</p>
+          {f'<p id="continueSelection"><a class="button" href="/selected">Continue with spool {current_spool_id}</a></p>' if current_spool_id else ""}
         </div>
+      </section>
+
+      <section class="panel stack">
+        <h2>Scan an NFC / RFID tag</h2>
+        <p class="muted">Use a reader that enters the hardware UID, or paste a UID from a reader app. Spoolman decides which spool it identifies.</p>
+        <form id="tagScanForm" class="stack">
+          <label>Tag UID
+            <input id="tagUid" class="input" required maxlength="128" autocomplete="off" spellcheck="false" placeholder="04:A2:B3:C4:D5:E6:F7" />
+          </label>
+          <label>Reader ID (optional)
+            <input id="tagReaderId" class="input" maxlength="64" pattern="[A-Za-z0-9._:-]+" autocomplete="off" placeholder="desk-reader" />
+          </label>
+          <button id="submitTagScan" class="button" type="submit">Find spool in Spoolman</button>
+        </form>
+        <div class="toolbar">
+          <button id="readNfc" class="button" type="button" hidden>Read tag with this phone</button>
+          <button id="stopNfc" class="button" type="button" hidden>Stop reading</button>
+        </div>
+        <p id="tagScanStatus" role="status" aria-live="polite"></p>
+        <p class="muted">Keyboard readers: focus Tag UID and send the hex UID followed by Enter. iPhone Safari needs a reader or companion app to supply the UID; it cannot read a blank tag directly.</p>
+        <p><a href="{escape(SPOOLMAN_BASE, quote=True)}" target="_blank" rel="noreferrer">Link or reassign tags in Spoolman</a></p>
       </section>
 
       <section class="panel scanner-wrap">
@@ -1415,7 +1501,7 @@ def home(request: Request) -> HTMLResponse:
         </ul>
       </section>
     </main>
-    <script>{HOME_SCAN_PAGE_SCRIPT}</script>
+    <script>{HOME_SCAN_PAGE_SCRIPT}{TAG_SCAN_PAGE_SCRIPT}</script>
     """
     return render_page("Home", body, request=request, active_nav="home")
 
@@ -1425,79 +1511,89 @@ def healthz() -> dict[str, object]:
     return {"ok": True, "spoolman_base": SPOOLMAN_BASE}
 
 
+async def render_selected_spool(spool_id: int) -> HTMLResponse:
+    spool_details_markup = ""
+    spool_details_notice = ""
+    try:
+        spool = await fetch_spoolman_spool(spool_id)
+    except httpx.HTTPError:
+        spool = {}
+        spool_details_notice = (
+            '<p class="muted">SpoolBud selected this spool, but could not load its details from Spoolman right now.</p>'
+        )
+
+    if spool:
+        spool_details_markup = render_spool_cards([spool], compact=True)
+
+    body = f"""
+    <main class="stack">
+      <section class="panel">
+        <h1 id="selectedHeading">Spool {spool_id} selected</h1>
+        <div id="spoolDetails">{spool_details_markup}{spool_details_notice}</div>
+        <p><a href="{escape(spool_url(spool_id), quote=True)}" target="_blank" rel="noreferrer">Open this spool in Spoolman</a></p>
+        <p id="moveComplete" hidden><a class="button" href="/">Move another spool</a></p>
+      </section>
+
+      <div id="selectionActions" class="stack" data-spool-id="{spool_id}">
+      <section class="panel stack">
+        <h2>Choose a destination</h2>
+        <p class="muted">Move or store this spool by choosing a location below or scanning its bin QR. A location change does not load a printer.</p>
+        <p id="destinationStatus" class="muted" role="status">Loading destinations...</p>
+        <p id="moveStatus" role="status" aria-live="polite"></p>
+        <form id="destinationForm" class="stack">
+          <label>Find or enter a destination
+            <input id="destinationSearch" class="input" type="search" required maxlength="200" placeholder="F-001 or PRINTER-1" />
+          </label>
+          <button class="button" type="submit">Move to entered destination</button>
+        </form>
+        <div id="destinations" class="grid destination-grid"></div>
+        <button id="cancelSelection" class="button" type="button">Cancel selection</button>
+      </section>
+      <section class="panel scanner-wrap">
+        <div class="toolbar">
+          <button id="startBinScanner" class="button" type="button">Open bin scanner</button>
+        </div>
+        <p id="scannerStatus" class="muted">Tap <strong>Open bin scanner</strong> to scan a bin QR in a popup.</p>
+        <label>
+          <div class="muted">Bin URL prefix (reference)</div>
+          <input id="spoolBudBase" class="input" value="" readonly />
+        </label>
+      </section>
+      <section id="binScannerModal" class="scanner-modal" aria-hidden="true">
+        <div class="scanner-modal-card">
+          <div class="toolbar">
+            <button id="runBinScanner" class="button" type="button">Start camera</button>
+            <button id="stopBinScanner" class="button" type="button" disabled>Stop scanner</button>
+            <button id="closeBinScanner" class="button" type="button">Close</button>
+          </div>
+          <video id="scannerVideo" class="scanner-video" playsinline muted></video>
+          <canvas id="scannerCanvas" hidden></canvas>
+        </div>
+      </section>
+      </div>
+    </main>
+    <script>{SCAN_PAGE_SCRIPT}</script>
+    """
+    response = render_page("Spool Selected", body)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/selected")
+async def selected_spool_page(request: Request):
+    spool_id = selected_spool_id(request)
+    if spool_id is None:
+        return render_page("Select a spool", '<main class="panel"><h1>No spool selected</h1><p><a href="/">Scan a tag or spool QR to begin.</a></p></main>', status_code=409)
+    return await render_selected_spool(spool_id)
+
+
 @app.get("/scan")
 async def scan(request: Request, value: str, stay: str | None = Query(default=None)):
     spool_id = extract_spool_id(value)
     if not spool_id:
-        raise HTTPException(status_code=400, detail="Could not identify a spool. Scan its QR or open its NFC link again.")
-
-    if wants_scan_stay(stay):
-        spool_details_markup = ""
-        spool_details_notice = ""
-        try:
-            spool = await fetch_spoolman_spool(spool_id)
-        except httpx.HTTPError:
-            spool = {}
-            spool_details_notice = (
-                '<p class="muted">SpoolBud selected this spool, but could not load its details from Spoolman right now.</p>'
-            )
-
-        if spool:
-            spool_details_markup = render_spool_cards([spool], compact=True)
-
-        body = f"""
-        <main class="stack">
-          <section class="panel">
-            <h1 id="selectedHeading">Spool {spool_id} selected</h1>
-            <div id="spoolDetails">{spool_details_markup}{spool_details_notice}</div>
-            <p><a href="{escape(spool_url(spool_id), quote=True)}" target="_blank" rel="noreferrer">Open this spool in Spoolman</a></p>
-            <p id="moveComplete" hidden><a class="button" href="/">Move another spool</a></p>
-          </section>
-
-          <div id="selectionActions" class="stack" data-spool-id="{spool_id}">
-          <section class="panel stack">
-            <h2>Choose a destination</h2>
-            <p class="muted">Choose a bucket below, tap its NFC tag and open the notification, or scan its QR.</p>
-            <p id="destinationStatus" class="muted" role="status">Loading destinations...</p>
-            <p id="moveStatus" role="status" aria-live="polite"></p>
-            <form id="destinationForm" class="stack">
-              <label>Find or enter a destination
-                <input id="destinationSearch" class="input" type="search" required maxlength="200" placeholder="F-001 or PRINTER-1" />
-              </label>
-              <button class="button" type="submit">Move to entered destination</button>
-            </form>
-            <div id="destinations" class="grid destination-grid"></div>
-            <button id="cancelSelection" class="button" type="button">Cancel selection</button>
-          </section>
-          <section class="panel scanner-wrap">
-            <div class="toolbar">
-              <button id="startBinScanner" class="button" type="button">Open bin scanner</button>
-            </div>
-            <p id="scannerStatus" class="muted">Tap <strong>Open bin scanner</strong> to scan a bin QR in a popup.</p>
-            <label>
-              <div class="muted">Bin URL prefix (reference)</div>
-              <input id="spoolBudBase" class="input" value="" readonly />
-            </label>
-          </section>
-          <section id="binScannerModal" class="scanner-modal" aria-hidden="true">
-            <div class="scanner-modal-card">
-              <div class="toolbar">
-                <button id="runBinScanner" class="button" type="button">Start camera</button>
-                <button id="stopBinScanner" class="button" type="button" disabled>Stop scanner</button>
-                <button id="closeBinScanner" class="button" type="button">Close</button>
-              </div>
-              <video id="scannerVideo" class="scanner-video" playsinline muted></video>
-              <canvas id="scannerCanvas" hidden></canvas>
-            </div>
-          </section>
-          </div>
-        </main>
-        <script>{SCAN_PAGE_SCRIPT}</script>
-        """
-        response = render_page("Spool Selected", body)
-    else:
-        response = RedirectResponse(url=spool_url(spool_id), status_code=302)
-
+        raise HTTPException(status_code=400, detail="Could not identify a spool from this QR value.")
+    response = (await render_selected_spool(spool_id) if wants_scan_stay(stay)
+                else RedirectResponse(url=spool_url(spool_id), status_code=302))
     return set_selection(response, spool_id)
 
 
@@ -1548,7 +1644,7 @@ async def set_location(location: str, request: Request, stay: str | None = None,
         <main class="panel">
           <h1>{escape(normalized_location)} is empty</h1>
           <p class="muted">No spool is selected in this browser, and Spoolman does not currently list any spools in this bin.</p>
-          <p>Tap a spool NFC tag or scan a spool QR first to update its location.</p>
+          <p>Resolve a spool tag through Spoolman or scan a spool QR first to update its location.</p>
         </main>
         """
         return render_page(f"Bin {normalized_location}", body, request=request)
@@ -1638,9 +1734,9 @@ def bins_page(request: Request) -> HTMLResponse:
     body = f"""
     <main class="stack">
       <section class="panel">
-        <h1>Bin QR Generator &amp; NFC Tags</h1>
-        <p class="muted">Prepare matching QR labels and NFC links for buckets and printer positions. Load configured and used destinations, or enter names below.</p>
-        <p class="muted">Copy each NFC link into your writing app as a URL/URI record. Cancel any active spool selection before tapping a destination tag just to verify it; a selected spool will be moved.</p>
+        <h1>Bin QR Generator</h1>
+        <p class="muted">Prepare QR labels for storage locations. Load configured shortcuts and used Spoolman locations, or enter names below.</p>
+        <p class="muted">Spoolman owns the stored location. Local shortcuts only help choose a destination. Opening a bin QR with a selected spool moves it there.</p>
       </section>
 
       <section class="panel stack">
@@ -1673,9 +1769,9 @@ def spools_page(request: Request) -> HTMLResponse:
     body = f"""
     <main class="stack">
       <section class="panel">
-        <h1>Spoolman-Compatible Spool QR Labels &amp; NFC Tags</h1>
-        <p>Create each physical spool in <a href="{escape(SPOOLMAN_BASE, quote=True)}" target="_blank" rel="noreferrer">Spoolman</a>, then load the list below to prepare its tag.</p>
-        <p class="muted">Copy the NFC link into NFC Tools: Write → Add a record → URL/URI → paste → Write. Tap the written tag and check the spool details before attaching it. Only the writing app writes the physical tag.</p>
+        <h1>Spoolman-Compatible Spool QR Labels</h1>
+        <p>Create each physical spool in <a href="{escape(SPOOLMAN_BASE, quote=True)}" target="_blank" rel="noreferrer">Spoolman</a>, then load the list below to prepare compatibility QR labels.</p>
+        <p class="muted">For NFC/RFID, use the spool’s Tags section in Spoolman to link its hardware UID. No data needs to be written to the tag. SpoolBud resolves tag associations through Spoolman.</p>
       </section>
 
       <section class="panel stack">
@@ -1694,7 +1790,7 @@ def spools_page(request: Request) -> HTMLResponse:
         </label>
 
         <label>
-          <div class="muted">Public SpoolBud base URL (for NFC and full URL QR labels)</div>
+          <div class="muted">Public SpoolBud base URL (for full URL QR labels)</div>
           <input id="spoolPublicBase" class="input" value="" />
         </label>
 

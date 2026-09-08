@@ -140,3 +140,73 @@ def test_device_scan_does_not_select_an_unrelated_browser(upstream):
         device.post("/api/tag/scan", json={"uid": "AA", "reader_id": "printer-1"})
         assert selected(device) == 42
         assert selected(browser) == 99
+
+
+def test_tag_selection_opens_shared_actions_without_qr_parsing(upstream, monkeypatch):
+    async def metadata(spool_id):
+        assert spool_id == 42
+        return {"id": 42, "name": "Matched spool", "location": "F-001"}
+
+    def no_qr_fallback(value):
+        # Numeric cookie parsing is still part of the legacy session contract.
+        assert value in {"", "42"}
+        return int(value) if value else None
+
+    monkeypatch.setattr(app, "fetch_spoolman_spool", metadata)
+    monkeypatch.setattr(app, "extract_spool_id", no_qr_fallback)
+    with TestClient(app.app) as client:
+        client.post("/api/tag/scan", json={"uid": "04-AA-BB"})
+        page = client.get("/selected?spool_id=999")
+        assert page.status_code == 200
+        assert page.headers["cache-control"] == "no-store"
+        assert "Spool 42 selected" in page.text
+        assert "Matched spool" in page.text
+        assert 'data-spool-id="42"' in page.text
+        assert "Spool 999 selected" not in page.text
+        assert "set-cookie" not in page.headers  # Viewing cannot reselect an old spool.
+
+
+@pytest.mark.parametrize("action", ["api", "bin"])
+def test_resolved_spool_moves_only_after_explicit_action(upstream, monkeypatch, action):
+    moves = []
+
+    async def patch(spool_id, location):
+        moves.append((spool_id, location))
+        return httpx.Response(200, request=httpx.Request("PATCH", "https://spoolman.test"))
+
+    monkeypatch.setattr(app, "patch_spool_location", patch)
+    with TestClient(app.app) as client:
+        client.post("/api/tag/scan", json={"uid": "999"})
+        assert not moves
+        response = (client.post("/api/move", json={"spool_id": 42, "location": "F-002"}) if action == "api"
+                    else client.get("/bin/F-002?stay=1"))
+        assert response.status_code == 200
+        assert moves == [(42, "F-002")]
+        assert selected(client) is None
+        assert client.get("/selected").status_code == 409
+
+
+def test_unknown_scan_removes_access_to_previous_actions(upstream):
+    with TestClient(app.app) as client:
+        client.post("/api/tag/scan", json={"uid": "AA"})
+        upstream["response"] = httpx.Response(200, json={"matched_spool_id": None})
+        client.post("/api/tag/scan", json={"uid": "BB"})
+        page = client.get("/selected")
+        assert page.status_code == 409
+        assert "No spool selected" in page.text
+        assert 'id="selectionActions"' not in page.text
+
+
+def test_scan_ui_and_qr_pages_no_longer_offer_nfc_writing():
+    with TestClient(app.app) as client:
+        home = client.get("/").text
+        assert "Tag UID" in home and "Reader ID" in home
+        assert "/api/tag/scan" in home
+        assert 'window.location.href = "/selected"' in home
+        assert "iPhone Safari needs a reader" in home
+        for route in ["/", "/spools", "/bins"]:
+            page = client.get(route).text
+            assert "Copy NFC link" not in page
+            assert "NFC Tools" not in page
+            assert "clipboard.writeText" not in page
+        assert "Tags section in Spoolman" in client.get("/spools").text
