@@ -14,6 +14,16 @@ from spoolbud.clients.spoolman import SpoolmanClient
 from spoolbud.parsing.spool_ids import extract_spool_id
 from spoolbud.services.spool_selection import clear_selected_spool, get_selected_spool, set_selected_spool
 from spoolbud.services.qr import render_qr_svg
+from spoolbud.services.bins import (
+    configured_bins as build_configured_bins,
+    default_bins,
+    get_bin_contents,
+    get_spoolman_locations,
+    move_selected_spool_to_bin,
+    normalize_location,
+    spool_location_values,
+    spools_in_location,
+)
 from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
 # Compatibility aliases remain while responsibilities move into the package.
@@ -24,9 +34,6 @@ COOKIE_MAX_AGE = settings.cookie_max_age
 DESTINATIONS = settings.destinations
 
 app = FastAPI(title="SpoolBud Helper")
-
-LOCATION_KEYS = ("location", "bin", "storage_location")
-EXTRA_LOCATION_KEYS = ("location", "bin")
 
 BASE_STYLES = """
 [hidden] { display: none !important; }
@@ -1124,45 +1131,12 @@ def spool_url(spool_id: int) -> str:
     return f"{SPOOLMAN_BASE}/spool/show/{spool_id}"
 
 
-def normalize_location(location: str) -> str:
-    return location.strip().upper()
-
-
-def default_bins() -> list[str]:
-    front = [f"F-{index:03d}" for index in range(1, 21)]
-    back = [f"B-{index:03d}" for index in range(1, 5)]
-    return front + back
-
-
 def configured_bins() -> list[str]:
-    return sorted({normalize_location(value) for value in re.split(r"[,\n]", DESTINATIONS) if value.strip()}) or default_bins()
+    return build_configured_bins(DESTINATIONS)
 
 
 def auth_headers() -> dict[str, str]:
     return SpoolmanClient(SPOOLMAN_BASE, API_TOKEN).auth_headers()
-
-
-def spool_location_values(spool: dict[str, Any]) -> set[str]:
-    values: set[str] = set()
-
-    for key in LOCATION_KEYS:
-        value = spool.get(key)
-        if value:
-            values.add(normalize_location(str(value)))
-
-    extra = spool.get("extra")
-    if isinstance(extra, dict):
-        for key in EXTRA_LOCATION_KEYS:
-            value = extra.get(key)
-            if value:
-                values.add(normalize_location(str(value)))
-
-    return values
-
-
-def spools_in_location(spools: list[dict[str, Any]], location: str) -> list[dict[str, Any]]:
-    normalized_location = normalize_location(location)
-    return [spool for spool in spools if normalized_location in spool_location_values(spool)]
 
 
 def spool_summary(spool: dict[str, Any]) -> str:
@@ -1315,17 +1289,11 @@ async def fetch_spoolman_spool(spool_id: int) -> dict[str, Any]:
 
 
 async def fetch_spoolman_locations() -> list[str]:
-    spools = await fetch_spoolman_spools()
-    seen: set[str] = set()
-
-    for spool in spools:
-        seen.update(spool_location_values(spool))
-
-    return sorted(seen)
+    return await get_spoolman_locations(fetch_spoolman_spools)
 
 
 async def fetch_spools_in_location(location: str) -> list[dict[str, Any]]:
-    return spools_in_location(await fetch_spoolman_spools(), location)
+    return await get_bin_contents(location, fetch_spoolman_spools)
 
 
 async def patch_spool_location(spool_id: int, location: str) -> httpx.Response:
@@ -1338,16 +1306,13 @@ def require_selection(request: Request, expected_spool_id: int) -> None:
 
 
 async def move_selected_spool(request: Request, spool_id: int, location: str) -> str:
-    require_selection(request, spool_id)
-    location = normalize_location(location)
-    if not location or len(location) > 200:
-        raise HTTPException(400, "Choose a destination between 1 and 200 characters long.")
-    try:
-        response = await patch_spool_location(spool_id, location)
-        response.raise_for_status()
-    except httpx.HTTPError:
-        raise HTTPException(502, "Spoolman could not confirm the move. Check the spool's location and connection, then try again.") from None
-    return location
+    return await move_selected_spool_to_bin(
+        request,
+        spool_id,
+        location,
+        get_selection=selected_spool_id,
+        update_location=patch_spool_location,
+    )
 
 
 def clear_selection(response: Response) -> Response:
