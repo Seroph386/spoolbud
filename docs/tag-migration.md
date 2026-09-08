@@ -34,3 +34,13 @@ can be reviewed independently. No remote push or deployment is included.
 Tag scanning requires Spoolman 0.27+; earlier servers keep the QR/move path but
 receive an upgrade message when the tag endpoint is unavailable. Physical tag
 readers and iPhone companion-app integration require a separate hardware pilot.
+
+## Phase 1 result
+
+Implemented `spoolman_tags.py` and `/api/tag/scan` with per-request matching and
+explicit failures. All 70 tests pass, including contract forwarding, upstream
+reassignment, rejection of client-supplied matches, session isolation, malformed
+input/responses, upstream errors, and the 34 compatibility tests. Docker now
+copies the integration module. The source API was checked directly because the
+published generated OpenAPI reference did not include the tag endpoints:
+[upstream tag.py](https://github.com/Donkie/Spoolman/blob/master/spoolman/api/v1/tag.py).

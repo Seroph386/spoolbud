@@ -10,6 +10,9 @@ import httpx
 import segno
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from pydantic import ValidationError
+
+from spoolman_tags import TagScanError, TagScanRequest, resolve_tag
 
 SPOOLMAN_BASE = os.getenv("SPOOLMAN_BASE", "https://filament.igetno.net").rstrip("/")
 API_TOKEN = os.getenv("SPOOLMAN_API_TOKEN", "")
@@ -1322,6 +1325,29 @@ def clear_selection(response: Response) -> Response:
     return response
 
 
+def set_selection(response: Response, spool_id: int) -> Response:
+    response.set_cookie(COOKIE_NAME, str(spool_id), max_age=COOKIE_MAX_AGE, samesite="Lax")
+    return response
+
+
+@app.post("/api/tag/scan")
+async def scan_tag(request: Request):
+    # Validate here so even malformed scans clear an older pending selection.
+    try:
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+            raise ValueError("Expected JSON")
+        scan = TagScanRequest.model_validate(await request.json())
+    except (ValueError, ValidationError):
+        return clear_selection(JSONResponse({"detail": "Send a JSON scan with a hardware UID and valid reader details. No spool was selected."}, status_code=400))
+    try:
+        spool_id = await resolve_tag(scan, base_url=SPOOLMAN_BASE, headers=auth_headers())
+    except TagScanError as exc:
+        return clear_selection(JSONResponse({"detail": str(exc)}, status_code=exc.status_code))
+    if spool_id is None:
+        return clear_selection(JSONResponse({"matched_spool_id": None, "detail": "This tag is not linked to a spool. Link it in Spoolman, then scan again."}))
+    return set_selection(JSONResponse({"matched_spool_id": spool_id}), spool_id)
+
+
 @app.post("/api/move")
 async def move_spool(request: Request, spool_id: int = Body(gt=0), location: str = Body()):
     location = await move_selected_spool(request, spool_id, location)
@@ -1472,15 +1498,13 @@ async def scan(request: Request, value: str, stay: str | None = Query(default=No
     else:
         response = RedirectResponse(url=spool_url(spool_id), status_code=302)
 
-    response.set_cookie(COOKIE_NAME, str(spool_id), max_age=COOKIE_MAX_AGE, samesite="Lax")
-    return response
+    return set_selection(response, spool_id)
 
 
 @app.get("/select/{spool_id}")
 def select_spool(spool_id: int):
     response = RedirectResponse(url=spool_url(spool_id), status_code=302)
-    response.set_cookie(COOKIE_NAME, str(spool_id), max_age=COOKIE_MAX_AGE, samesite="Lax")
-    return response
+    return set_selection(response, spool_id)
 
 
 @app.get("/bin/{location:path}")

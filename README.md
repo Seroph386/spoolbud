@@ -119,3 +119,23 @@ docker pull --platform linux/arm64 ghcr.io/<owner>/spoolbud:latest
 ## Agent guidance
 
 Repository-level AI agent guidance lives in `AGENTS.md` (principles, architecture constraints, and extension expectations).
+
+## Migration phase 1: Spoolman-owned tag resolution
+
+New NFC/RFID identity is resolved by Spoolman 0.27+. Send a hardware UID to
+SpoolBud's `POST /api/tag/scan` as JSON, optionally including `reader_id`, `name`,
+`format`, and opaque `payload_b64`. SpoolBud forwards these fields unchanged to
+Spoolman's `POST /api/v1/tag/scan` and uses only `matched_spool_id` from its reply.
+It does not decode tag contents, derive IDs, or cache associations.
+
+A positive match selects that spool in the requesting session. A null match
+clears selection and asks you to link the tag in Spoolman. Invalid scans,
+malformed responses, and unavailable services also clear old selection. The
+response returns a match or an actionable error without upstream details.
+QR selection remains available on older Spoolman servers.
+
+A device's HTTP request cannot select a different browser. Use the browser's
+own scan form (phase 2), or a client that retains the session cookie and follows
+up in that same session. `reader_id` is upstream metadata, not session pairing.
+The preceding NFC-writing instructions describe the superseded prototype and
+are removed in the next UI migration phase; do not prepare new ID-based tags.
