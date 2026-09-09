@@ -21,6 +21,10 @@ stations and load/unload workflows are future extensions of this boundary.
 - Treat `spool.extra.nfc_id` as the current tag association owned by Spoolman;
   never trust an unvalidated first result from an extra-field query because
   missing fields or partial filtering can return unrelated spools.
+- Spoolman's API represents every extra-field value as a JSON-encoded string.
+  Decode `nfc_id` before display/comparison and JSON-encode it when patching.
+  Patch only the `nfc_id` key; Spoolman merges extra fields per key, preserving
+  unrelated metadata.
 - Never infer a spool ID from a UID, tag payload, reader ID, or a client-supplied
   match. Never maintain a local UID-to-spool map, cache, or tag database.
 - Do not encode Spoolman IDs into NFC tags or offer physical NFC tag-writing

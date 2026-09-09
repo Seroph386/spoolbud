@@ -52,9 +52,10 @@ loads `app:app`, and all existing URLs and environment variables remain valid.
 The tag URL contains the hardware UID, not a Spoolman spool ID. The unassigned
 page lists existing, non-archived Spoolman spools and filters them in the browser
 by ID, material, vendor, location, or current NFC ID. Assigning never creates a
-spool. Because Spoolman 0.26 replaces the complete `extra` object on update,
-SpoolBud reloads the chosen spool and preserves its other extra fields while
-setting `nfc_id`. Replacing a different current NFC ID requires confirmation.
+spool. Spoolman's wire format JSON-encodes every extra-field value, including
+text fields. SpoolBud decodes those values for comparison/display and patches
+only the encoded `nfc_id` key, so Spoolman's per-key merge preserves other extra
+fields. Replacing a different current NFC ID requires confirmation.
 The physical tag URL stays the same. iPhone is only responsible for opening the
 NDEF URL; SpoolBud does not use Web NFC or any browser-side NFC API.
 
@@ -71,8 +72,8 @@ GET /api/v1/spool?extra.nfc_id=04A2B3C4D5E6F7
 
 Extra-field filtering can be partial and a missing field can yield unrelated
 rows, so SpoolBud never trusts the first result. It normalizes and compares each
-returned `extra.nfc_id`; zero validated matches is unknown, and multiple matches
-are reported as a configuration error.
+decoded `extra.nfc_id`; zero validated matches is unknown, and multiple matches
+are reported as a configuration error with links to the affected spool records.
 
 The client checks Spoolman's own `/api/v1/info` response for capability. When a
 future 0.27+ server advertises native tags, SpoolBud prefers

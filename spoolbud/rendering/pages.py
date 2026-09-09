@@ -15,6 +15,7 @@ from spoolbud.rendering.assets import (
     SCAN_PAGE_SCRIPT,
 )
 from spoolbud.rendering.components import render_page, render_spool_cards, spool_summary
+from spoolbud.parsing.extra_fields import decode_text_extra
 from spoolbud.services.bins import spool_location_values
 
 
@@ -205,12 +206,12 @@ def render_unassigned_tag(
         summary = spool_summary(spool)
         location = ", ".join(sorted(spool_location_values(spool))) or "Unassigned"
         extra = spool.get("extra")
-        stored_uid = extra.get("nfc_id") if isinstance(extra, dict) else None
-        current_tag = str(stored_uid) if stored_uid is not None else ""
+        stored_uid = decode_text_extra(extra.get("nfc_id")) if isinstance(extra, dict) else None
+        current_tag = stored_uid or ""
         replacement = bool(current_tag)
         search_value = f"{spool_id} {summary} {location} {current_tag}".lower()
         tag_notice = (
-            f'<p class="muted">Current NFC ID: <code>{escape(current_tag)}</code> — confirmation will be required to replace it.</p>'
+            f'<p class="muted">Stored NFC ID reported by the Spoolman API: <code>{escape(current_tag)}</code> — confirmation will be required to replace it.</p>'
             if replacement
             else '<p class="muted">No NFC ID currently assigned.</p>'
         )
@@ -268,12 +269,18 @@ def render_unassigned_tag(
     return render_page("Unassigned NFC Tag", body, current_spool_id=None, spoolman_base=spoolman_base)
 
 
-def render_duplicate_tag(uid: str, spoolman_base: str) -> HTMLResponse:
+def render_duplicate_tag(uid: str, spool_ids: list[int], spoolman_base: str) -> HTMLResponse:
+    spool_links = ", ".join(
+        f'<a href="{escape(f"{spoolman_base}/spool/show/{spool_id}", quote=True)}" '
+        f'target="_blank" rel="noreferrer">{spool_id}</a>'
+        for spool_id in spool_ids
+    )
     body = f"""<main class="panel stack">
       <h1>NFC configuration error</h1>
-      <p>Multiple spools have the same NFC ID.</p>
+      <p>Spoolman's API reports this NFC ID on multiple spools.</p>
       <p>UID: <code>{escape(uid)}</code></p>
-      <p>Check the <code>nfc_id</code> extra fields in Spoolman.</p>
+      <p>Affected spool records: {spool_links}</p>
+      <p>Clear the stored <code>nfc_id</code> from every spool except the one that owns this tag. If the Spoolman UI shows a blank field, the raw API record may still contain an older value.</p>
       <p><a class="button" href="{escape(spoolman_base, quote=True)}" target="_blank" rel="noreferrer">Open Spoolman</a></p>
     </main>"""
     return render_page("NFC configuration error", body, current_spool_id=None, spoolman_base=spoolman_base, status_code=409)

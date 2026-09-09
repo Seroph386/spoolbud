@@ -85,10 +85,30 @@ def test_unknown_tag_clears_previous_selection_and_renders_help(monkeypatch):
     assert "Select the Spoolman spool" in response.text
     assert "Cookiecad" in response.text
     assert "Backup PETG" in response.text
-    assert "Current NFC ID" in response.text
+    assert "Stored NFC ID reported by the Spoolman API" in response.text
     assert "Associate NFC tag" in response.text
     assert "Open Spoolman" in response.text
     assert "Try another tag" in response.text
+
+
+def test_unassigned_page_treats_json_encoded_empty_nfc_fields_as_blank(monkeypatch):
+    async def lookup(uid):
+        return None
+
+    async def spools():
+        return [
+            {"id": 42, "name": "Empty string", "extra": {"nfc_id": '""'}},
+            {"id": 77, "name": "Encoded null", "extra": {"nfc_id": "null"}},
+        ]
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", spools)
+    with TestClient(app.app) as client:
+        response = client.get("/tag/04A2B3C4")
+    assert response.status_code == 200
+    assert response.text.count("No NFC ID currently assigned.") == 2
+    assert "confirmation will be required" not in response.text
+    assert 'data-replace-existing="true"' not in response.text
 
 
 def test_assignment_writes_normalized_uid_and_selects_spool(monkeypatch):
@@ -212,7 +232,10 @@ def test_duplicate_uid_is_configuration_error_and_logs_spool_ids(monkeypatch, ca
         assert response.status_code == 409
         assert selected(client) is None
     assert "NFC configuration error" in response.text
-    assert "Multiple spools have the same NFC ID" in response.text
+    assert "Spoolman's API reports this NFC ID on multiple spools" in response.text
+    assert "Affected spool records" in response.text
+    assert ">42</a>" in response.text
+    assert ">77</a>" in response.text
     assert "42, 77" in caplog.text
 
 
