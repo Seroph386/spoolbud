@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from spoolbud import dependencies as deps
-from spoolbud.clients.spoolman import TagScanError, TagScanRequest
+from spoolbud.clients.spoolman import DuplicateTagUIDError, TagLookupError, TagScanRequest
 from spoolbud.rendering.components import spool_color_hex, spool_summary
 from spoolbud.services.bins import default_bins, spool_location_values
 from spoolbud.services.qr import render_qr_svg
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -30,14 +33,17 @@ async def scan_tag(request: Request):
         )
     try:
         spool_id = await deps.resolve_tag_scan(scan)
-    except TagScanError as exc:
+    except DuplicateTagUIDError as exc:
+        logger.warning("Duplicate nfc_id configuration matched spool IDs %s", exc.spool_ids)
+        return deps.clear_selection(JSONResponse({"detail": str(exc)}, status_code=exc.status_code))
+    except TagLookupError as exc:
         return deps.clear_selection(JSONResponse({"detail": str(exc)}, status_code=exc.status_code))
     if spool_id is None:
         return deps.clear_selection(
             JSONResponse(
                 {
                     "matched_spool_id": None,
-                    "detail": "This tag is not linked to a spool. Link it in Spoolman, then scan again.",
+                    "detail": "This tag is not associated with a spool. Open its /tag/<uid> URL in a browser to choose a spool.",
                 }
             )
         )

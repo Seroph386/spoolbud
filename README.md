@@ -1,8 +1,9 @@
 # SpoolBud physical filament workflows
 
 SpoolBud is a lightweight UI for selecting and moving/storing filament spools.
-Spoolman 0.27+ owns inventory, metadata, locations, and NFC/RFID tag associations.
-SpoolBud has no tag database, inventory mirror, or NFC writer.
+Spoolman owns inventory, metadata, locations, and NFC/RFID identity. Current
+Spoolman 0.26.x + SpoolSense installations store that identity in the spool's
+`extra.nfc_id` field. SpoolBud has no tag database or inventory mirror.
 
 ## Internal architecture
 
@@ -12,8 +13,8 @@ SpoolBud has no tag database, inventory mirror, or NFC writer.
 not contain page markup or direct HTTP calls.
 
 - `spoolbud/clients/spoolman.py` owns Spoolman URLs, authentication headers,
-  timeouts, HTTP requests, and tag response validation.
-- `spoolbud/parsing/spool_ids.py` owns compatibility spool-reference parsing.
+  timeouts, version-compatible tag lookup, and response validation.
+- `spoolbud/parsing/` owns NFC UID normalization and compatibility spool-reference parsing.
 - `spoolbud/services/` owns cookie selection, bin workflows, and QR generation.
 - `spoolbud/rendering/` owns HTML components, complete page rendering, CSS, and
   browser scripts.
@@ -23,48 +24,60 @@ not contain page markup or direct HTTP calls.
 The package introduces no new runtime service or persistence. Uvicorn still
 loads `app:app`, and all existing URLs and environment variables remain valid.
 
-1. Open SpoolBud. Use a reader to enter a tag UID, or scan a compatibility spool QR.
-2. Tag scans are resolved by Spoolman's `POST /api/v1/tag/scan`. Only its
-   `matched_spool_id` becomes the selected spool.
+1. Tap a spool's NFC tag with an iPhone, or scan a compatibility spool QR.
+2. The NFC tag opens `/tag/<uid>`. SpoolBud resolves that UID against Spoolman
+   and selects only a validated matching spool.
 3. Check the selected spool's details, then choose a storage location or scan a
    bin QR. Scanning a spool alone never moves it or loads a printer.
 4. A successful location update clears selection; failed moves keep it for retry.
    Use **Cancel selection** to abandon an unfinished workflow.
 
-## New spools and tag associations
+## iPhone NFC workflow
 
-Create each physical spool in Spoolman. In that spool's **Tags** section, use
-**Add tag** to associate the hardware UID supplied by your reader. Link, unlink,
-or move that association in Spoolman when reusing a tag. No spool ID needs to be
-written to the tag. SpoolBud queries Spoolman again on every scan, so reassignment
-is picked up without updating labels or a local mapping.
+1. Read the tag's hardware UID and write this NDEF URL to the tag:
 
-See [Spoolman's tag-scanner guide](https://github.com/Donkie/Spoolman/wiki/Tag-scanners)
-for linking and reader setup. Tag contents are not automatically converted into
-filament metadata; create inventory in Spoolman before linking it.
+   ```text
+   https://<spoolbud>/tag/<uid>
+   ```
 
-## How a reader supplies a scan
+2. The iPhone reads the NDEF URL and opens SpoolBud in the browser.
+3. SpoolBud normalizes `<uid>` to uppercase hex and looks it up in Spoolman.
+   If it is unassigned, search for and select the existing Spoolman spool;
+   SpoolBud writes the normalized UID into that spool's `nfc_id` extra field.
+4. Once associated, SpoolBud verifies the returned spool's `extra.nfc_id` and
+   selects it.
+5. Choose an F-series bin, B-series bin, another known location, or scan an
+   existing bin QR code. SpoolBud updates that spool's Spoolman location.
 
-- **Keyboard reader:** focus **Tag UID** on SpoolBud's home page. Configure the
-  reader to enter the hardware UID as hex followed by Enter. The browser submits
-  the scan using its own session. Reader ID is optional descriptive metadata.
-- **Paste/type:** enter the UID reported by your reader app and press **Find spool
-  in Spoolman**. This uses the same API as a keyboard reader.
-- **Supported Android browser:** **Read tag with this phone** appears when Web NFC
-  is available in a secure context. It submits only the hardware serial number;
-  it does not decode NDEF records or write tags. Web NFC has tag/hardware limits;
-  a compatible external reader may be needed for vendor tags.
-- **iPhone Safari:** direct UID reading is unavailable. Use a reader or companion
-  app to supply the UID; a blank tag does not automatically open SpoolBud. This
-  migration does not include a native iPhone app or a background reader listener.
+The tag URL contains the hardware UID, not a Spoolman spool ID. The unassigned
+page lists existing, non-archived Spoolman spools and filters them in the browser
+by ID, material, vendor, location, or current NFC ID. Assigning never creates a
+spool. Because Spoolman 0.26 replaces the complete `extra` object on update,
+SpoolBud reloads the chosen spool and preserves its other extra fields while
+setting `nfc_id`. Replacing a different current NFC ID requires confirmation.
+The physical tag URL stays the same. iPhone is only responsible for opening the
+NDEF URL; SpoolBud does not use Web NFC or any browser-side NFC API.
 
-Spoolman's upstream reader pairing controls its own UI; it does not pair a
-SpoolBud browser. A standalone device POST selects only that HTTP client's
-session, not a tablet elsewhere. For the current UI, use a keyboard reader or
-submit through the browser. Future network-reader handoff must explicitly bind
-reader events to a browser/station rather than sharing a global selected spool.
-A `reader_id` is metadata, not authentication or a session token. Supplying a
-stable ID also avoids Spoolman deriving it from the shared SpoolBud server IP.
+The home page also accepts a pasted or keyboard-reader UID and opens the same
+`/tag/<uid>` workflow.
+
+## Spoolman tag lookup compatibility
+
+Spoolman 0.26.x supports filtering spools with:
+
+```http
+GET /api/v1/spool?extra.nfc_id=04A2B3C4D5E6F7
+```
+
+Extra-field filtering can be partial and a missing field can yield unrelated
+rows, so SpoolBud never trusts the first result. It normalizes and compares each
+returned `extra.nfc_id`; zero validated matches is unknown, and multiple matches
+are reported as a configuration error.
+
+The client checks Spoolman's own `/api/v1/info` response for capability. When a
+future 0.27+ server advertises native tags, SpoolBud prefers
+`GET /api/v1/spool?tag=<uid>` and falls back to `extra.nfc_id` when that lookup is
+unsupported or unmatched. Current functionality does not depend on unreleased APIs.
 
 ## Scan API contract
 
@@ -77,25 +90,25 @@ Content-Type: application/json
 {"uid":"04:A2:B3:C4:D5:E6:F7","reader_id":"desk-reader","name":"Desk"}
 ```
 
-Optional `format` and `payload_b64` fields are forwarded unchanged. UID
-normalization and matching belong entirely to Spoolman. Payloads are never
-parsed for IDs. Client-supplied `matched_spool_id` or `spool_id` fields are rejected.
+Optional legacy reader metadata is accepted for compatibility but is not used
+to identify a spool. UIDs are normalized server-side. Client-supplied
+`matched_spool_id` or `spool_id` fields are rejected.
 
 A successful reply is `{"matched_spool_id":42}` plus the selected-spool cookie.
 The same client can open `/selected` or perform an explicit move. Browser clients
-must retain the cookie. A `null` match returns 200 with guidance to link the tag
-in Spoolman and clears any older selection. Invalid input/rejected scans return
+must retain the cookie. A `null` match returns 200 with guidance to open the
+interactive tag URL and clears any older selection. Invalid input/rejected scans return
 400; upstream failures or invalid match responses return 502. All these failure
 paths clear selection rather than leaving an earlier spool ready to move.
-There is no automatic retry, local tag match, spool creation, or tag registration.
-
-Tag scanning requires the upstream endpoint to be available in Spoolman 0.27+.
-A missing endpoint produces an upgrade/configuration message; older servers
-continue to support the compatibility QR and location-update workflows.
+There is no local UID map, spool creation, or automatic tag assignment. The
+interactive `/tag/{uid}` page is the only assignment workflow and requires an
+explicit spool choice.
 
 ## Endpoints
 
-- `POST /api/tag/scan` — resolve a hardware UID through Spoolman; see the contract below
+- `GET /tag/{uid}` — normalize an NDEF URL's hardware UID; resolve and select a known spool, or show the searchable assignment workflow for an unassigned UID
+- `POST /tag/{uid}/assign` — JSON `{ "spool_id": 42, "replace_existing": false }`; re-check the UID, merge it into the selected spool's `extra.nfc_id`, verify the response, and select that spool
+- `POST /api/tag/scan` — compatibility JSON entry point using the same UID resolver
 - `GET /selected` — show actions for the session’s selected spool without parsing QR data or changing selection; returns 409 without a selection
 - `GET /healthz` — health probe
 - `GET /status` — current selected spool for this browser session
@@ -151,9 +164,9 @@ https://spoolbud.example.net/bin/PRINTER%20%2F%20LEFT?stay=1
 
 Previously written ID-based URL tags still reach the legacy scan route, just as
 an existing QR or manually opened link does. This compatibility path does **not**
-verify a Spoolman tag association. Do not prepare new NFC tags with these links;
-associate their UIDs in Spoolman instead. Bin URL tags that already exist also
-continue to open the corresponding bin route.
+verify `extra.nfc_id`. Prepare new NFC tags with `/tag/<uid>` URLs; the first tap
+can associate the UID with an existing spool from SpoolBud. Bin URL tags that
+already exist also continue to open the corresponding bin route.
 
 `/scan` without `stay=1` and `/select/{spool_id}` keep their Spoolman redirects.
 `/bin/{location}` without `stay=1` still moves a selected spool and redirects to

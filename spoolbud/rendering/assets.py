@@ -276,6 +276,23 @@ textarea.input {
   background: var(--surface-muted);
 }
 
+.association-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.8rem;
+  align-items: start;
+  cursor: pointer;
+}
+
+.association-choice:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.association-choice input {
+  margin-top: 0.35rem;
+}
+
 .qr-card {
   text-align: center;
   overflow-wrap: anywhere;
@@ -861,84 +878,78 @@ TAG_SCAN_PAGE_SCRIPT = r"""
 (() => {
   const form = document.getElementById("tagScanForm");
   const uid = document.getElementById("tagUid");
-  const readerId = document.getElementById("tagReaderId");
   const status = document.getElementById("tagScanStatus");
   const submit = document.getElementById("submitTagScan");
-  const read = document.getElementById("readNfc");
-  const stop = document.getElementById("stopNfc");
-  let controller = null;
   let busy = false;
-
-  function stopReading() {
-    controller?.abort();
-    controller = null;
-    read.disabled = busy;
-    stop.hidden = true;
-  }
 
   async function resolveUid(value) {
     if (busy) return;
     busy = true;
-    stopReading();
     submit.disabled = true;
     for (const id of ["currentSelection", "continueSelection"]) {
       const previous = document.getElementById(id);
       if (previous) previous.hidden = true;
     }
-    status.textContent = "Asking Spoolman to identify the tag...";
-    try {
-      const body = {uid: value};
-      if (readerId.value.trim()) body.reader_id = readerId.value.trim();
-      const result = await requestJson("/api/tag/scan", body);
-      if (result.matched_spool_id !== null) {
-        window.location.href = "/selected";
-        return;
-      }
-      status.textContent = result.detail;
-    } catch (error) {
-      status.textContent = error.message;
-    } finally {
-      busy = false;
-      submit.disabled = false;
-      read.disabled = false;
-      uid.select();
-    }
+    status.textContent = "Opening the NFC tag URL...";
+    window.location.href = `/tag/${encodeURIComponent(value)}`;
   }
 
   form.addEventListener("submit", event => {
     event.preventDefault();
     resolveUid(uid.value.trim());
   });
-  read.hidden = !(window.isSecureContext && "NDEFReader" in window);
-  read.addEventListener("click", async () => {
-    if (busy || controller) return;
-    controller = new AbortController();
-    const signal = controller.signal;
-    read.disabled = true;
-    stop.hidden = false;
+})();
+"""
+
+
+TAG_ASSIGN_PAGE_SCRIPT = r"""
+(() => {
+  const form = document.getElementById("tagAssignmentForm");
+  const search = document.getElementById("spoolAssignmentSearch");
+  const choices = [...document.querySelectorAll(".association-choice")];
+  const status = document.getElementById("tagAssignmentStatus");
+  const submit = document.getElementById("assignTagButton");
+  if (!form || !search || !status || !submit) return;
+
+  function filterSpools() {
+    const query = search.value.trim().toLowerCase();
+    let visible = 0;
+    for (const choice of choices) {
+      choice.hidden = !choice.dataset.search.includes(query);
+      if (!choice.hidden) visible += 1;
+    }
+    document.getElementById("assignmentResultCount").textContent = `${visible} spool${visible === 1 ? "" : "s"} shown`;
+  }
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const selected = form.querySelector('input[name="spool_id"]:checked');
+    if (!selected) {
+      status.textContent = "Select a spool first.";
+      return;
+    }
+    const replaceExisting = selected.dataset.replaceExisting === "true";
+    if (replaceExisting && !window.confirm("This spool already has a different NFC ID. Replace it with this tag?")) {
+      return;
+    }
+
+    submit.disabled = true;
+    status.textContent = "Associating tag in Spoolman...";
     try {
-      const reader = new NDEFReader();
-      reader.onreading = event => {
-        if (signal.aborted) return;
-        // Use the hardware serial only. Never inspect NDEF records for IDs.
-        uid.value = event.serialNumber || "";
-        resolveUid(uid.value);
-      };
-      reader.onreadingerror = () => {
-        if (!signal.aborted) resolveUid("");
-      };
-      await reader.scan({signal});
-      if (!signal.aborted) status.textContent = "Hold a supported NFC tag near the phone.";
+      await requestJson(`${window.location.pathname}/assign`, {
+        spool_id: Number(selected.value),
+        replace_existing: replaceExisting,
+      });
+      status.textContent = "Associated. Opening the spool...";
+      window.location.reload();
     } catch (error) {
-      if (error.name !== "AbortError") status.textContent = "Could not start NFC reading. Check permissions and hardware, or use a reader to enter the UID.";
-      stopReading();
+      status.textContent = error.message;
+      submit.disabled = false;
     }
   });
-  stop.addEventListener("click", () => {
-    stopReading();
-    status.textContent = "NFC reading stopped.";
-  });
-  window.addEventListener("pagehide", stopReading);
+
+  search.addEventListener("input", filterSpools);
+  filterSpools();
 })();
 """
 
@@ -1004,8 +1015,9 @@ SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
         return;
       }
       document.getElementById("selectedHeading").textContent = `Spool ${data.spool_id} moved to ${data.location}`;
-      document.getElementById("spoolDetails").hidden = true;
+      document.getElementById("selectedSummary").hidden = true;
       actions.hidden = true;
+      document.getElementById("moveDestination").textContent = data.location;
       document.getElementById("moveComplete").hidden = false;
       window.history.replaceState(null, "", "/");
     } catch (error) {
@@ -1084,4 +1096,3 @@ SCAN_PAGE_SCRIPT = SCANNER_CORE_SCRIPT + r"""
   });
 })();
 """
-

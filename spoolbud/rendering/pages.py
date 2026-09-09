@@ -10,10 +10,12 @@ from spoolbud.rendering.assets import (
     BINS_PAGE_SCRIPT,
     HOME_SCAN_PAGE_SCRIPT,
     SPOOLS_PAGE_SCRIPT,
+    TAG_ASSIGN_PAGE_SCRIPT,
     TAG_SCAN_PAGE_SCRIPT,
     SCAN_PAGE_SCRIPT,
 )
-from spoolbud.rendering.components import render_page, render_spool_cards
+from spoolbud.rendering.components import render_page, render_spool_cards, spool_summary
+from spoolbud.services.bins import spool_location_values
 
 
 def render_home(current_spool_id: int | None, spoolman_base: str) -> HTMLResponse:
@@ -31,30 +33,23 @@ def render_home(current_spool_id: int | None, spoolman_base: str) -> HTMLRespons
         </div>
         <div>
           <h1>Select a spool, then choose its destination</h1>
-          <p class="muted">Scan a tag through Spoolman or use a spool QR. Then move or store the selected spool using a destination button or bin QR.</p>
+          <p class="muted">Tap an NFC URL tag or use a spool QR. Then move or store the selected spool using a destination button or bin QR.</p>
           {f'<p id="continueSelection"><a class="button" href="/selected">Continue with spool {current_spool_id}</a></p>' if current_spool_id else ""}
         </div>
       </section>
 
       <section class="panel stack">
-        <h2>Scan an NFC / RFID tag</h2>
-        <p class="muted">Use a reader that enters the hardware UID, or paste a UID from a reader app. Spoolman decides which spool it identifies.</p>
+        <h2>Open an NFC tag UID</h2>
+        <p class="muted">New tags should contain an NDEF URL such as <code>https://spoolbud.example.net/tag/04A2B3C4D5E6F7</code>. You can also enter the hardware UID here.</p>
         <form id="tagScanForm" class="stack">
           <label>Tag UID
             <input id="tagUid" class="input" required maxlength="128" autocomplete="off" spellcheck="false" placeholder="04:A2:B3:C4:D5:E6:F7" />
           </label>
-          <label>Reader ID (optional)
-            <input id="tagReaderId" class="input" maxlength="64" autocomplete="off" placeholder="desk-reader" />
-          </label>
           <button id="submitTagScan" class="button" type="submit">Find spool in Spoolman</button>
         </form>
-        <div class="toolbar">
-          <button id="readNfc" class="button" type="button" hidden>Read tag with this phone</button>
-          <button id="stopNfc" class="button" type="button" hidden>Stop reading</button>
-        </div>
         <p id="tagScanStatus" role="status" aria-live="polite"></p>
-        <p class="muted">Keyboard readers: focus Tag UID and send the hex UID followed by Enter. iPhone Safari needs a reader or companion app to supply the UID; it cannot read a blank tag directly.</p>
-        <p><a href="{escape(spoolman_base, quote=True)}" target="_blank" rel="noreferrer">Link or reassign tags in Spoolman</a></p>
+        <p class="muted">On iPhone, the system reads the NDEF URL and opens SpoolBud. SpoolBud resolves the UID server-side; it does not use Web NFC.</p>
+        <p><a href="{escape(spoolman_base, quote=True)}" target="_blank" rel="noreferrer">Manage the nfc_id extra field in Spoolman</a></p>
       </section>
 
       <section class="panel scanner-wrap">
@@ -105,6 +100,7 @@ def render_selected_spool(
     spoolman_base: str,
 ) -> HTMLResponse:
     details = render_spool_cards([spool], spoolman_base=spoolman_base, compact=True) if spool else ""
+    summary = spool_summary(spool) if spool else f"Spool #{spool_id}"
     notice = (
         '<p class="muted">SpoolBud selected this spool, but could not load its details from Spoolman right now.</p>'
         if lookup_failed
@@ -112,11 +108,21 @@ def render_selected_spool(
     )
     body = f"""
     <main class="stack">
-      <section class="panel">
+      <section id="selectedSummary" class="panel">
         <h1 id="selectedHeading">Spool {spool_id} selected</h1>
         <div id="spoolDetails">{details}{notice}</div>
         <p><a href="{escape(f"{spoolman_base}/spool/show/{spool_id}", quote=True)}" target="_blank" rel="noreferrer">Open this spool in Spoolman</a></p>
-        <p id="moveComplete" hidden><a class="button" href="/">Move another spool</a></p>
+      </section>
+
+      <section id="moveComplete" class="panel stack" hidden>
+        <h1>Moved</h1>
+        <p><strong>{escape(summary)}</strong></p>
+        <p>to</p>
+        <p><strong id="moveDestination"></strong></p>
+        <div class="toolbar">
+          <a class="button" href="/">Done</a>
+          <a class="button" href="/">Move another spool</a>
+        </div>
       </section>
 
       <div id="selectionActions" class="stack" data-spool-id="{spool_id}">
@@ -172,6 +178,115 @@ def render_no_selection(spoolman_base: str) -> HTMLResponse:
         spoolman_base=spoolman_base,
         status_code=409,
     )
+
+
+def render_invalid_tag_uid(uid: str, spoolman_base: str) -> HTMLResponse:
+    body = f"""<main class="panel stack">
+      <h1>Invalid NFC Tag</h1>
+      <p>The tag UID must contain hexadecimal byte pairs. Spaces, colons, and hyphens are allowed.</p>
+      <p>Received: <code>{escape(uid)}</code></p>
+      <p><a class="button" href="/">Try another tag</a></p>
+    </main>"""
+    return render_page("Invalid NFC Tag", body, current_spool_id=None, spoolman_base=spoolman_base, status_code=400)
+
+
+def render_unassigned_tag(
+    uid: str,
+    spools: list[dict],
+    spoolman_base: str,
+    *,
+    load_error: str | None = None,
+) -> HTMLResponse:
+    choices: list[str] = []
+    for spool in spools:
+        spool_id = spool.get("id")
+        if type(spool_id) is not int or spool_id <= 0:
+            continue
+        summary = spool_summary(spool)
+        location = ", ".join(sorted(spool_location_values(spool))) or "Unassigned"
+        extra = spool.get("extra")
+        stored_uid = extra.get("nfc_id") if isinstance(extra, dict) else None
+        current_tag = str(stored_uid) if stored_uid is not None else ""
+        replacement = bool(current_tag)
+        search_value = f"{spool_id} {summary} {location} {current_tag}".lower()
+        tag_notice = (
+            f'<p class="muted">Current NFC ID: <code>{escape(current_tag)}</code> — confirmation will be required to replace it.</p>'
+            if replacement
+            else '<p class="muted">No NFC ID currently assigned.</p>'
+        )
+        choices.append(
+            f"""<label class="card association-choice" data-search="{escape(search_value, quote=True)}">
+              <input type="radio" name="spool_id" value="{spool_id}" data-replace-existing="{str(replacement).lower()}" />
+              <span>
+                <strong>Spool {spool_id}</strong>
+                <span class="spool-meta">{escape(summary)}</span><br />
+                <span class="muted">Location: {escape(location)}</span>
+                {tag_notice}
+              </span>
+            </label>"""
+        )
+
+    if load_error:
+        chooser = f"""<section class="panel stack">
+          <h2>Could not load spools</h2>
+          <p>{escape(load_error)}</p>
+          <p><a class="button" href="">Try again</a></p>
+        </section>"""
+    elif choices:
+        chooser = f"""<section class="panel stack">
+          <h2>Select the Spoolman spool</h2>
+          <p class="muted">Search by spool number, material, vendor, location, or current NFC ID.</p>
+          <form id="tagAssignmentForm" class="stack">
+            <label>Search spools
+              <input id="spoolAssignmentSearch" class="input" type="search" autocomplete="off" placeholder="42, PLA, Cookiecad, F-008..." />
+            </label>
+            <p id="assignmentResultCount" class="muted"></p>
+            <div class="spool-list">{"".join(choices)}</div>
+            <button id="assignTagButton" class="button" type="submit">Associate NFC tag</button>
+          </form>
+          <p id="tagAssignmentStatus" role="status" aria-live="polite"></p>
+        </section>"""
+    else:
+        chooser = """<section class="panel stack">
+          <h2>No available spools</h2>
+          <p>Create a spool in Spoolman, then reload this page to associate it.</p>
+        </section>"""
+
+    body = f"""<main class="stack">
+      <section class="panel stack">
+        <h1>Unassigned NFC Tag</h1>
+        <p>UID: <code>{escape(uid)}</code></p>
+        <p>This tag is not associated with a spool yet. Choose an existing Spoolman spool below.</p>
+      </section>
+      {chooser}
+      <section class="panel toolbar">
+        <a href="{escape(spoolman_base, quote=True)}" target="_blank" rel="noreferrer">Open Spoolman</a>
+        <a href="/">Try another tag</a>
+      </section>
+    </main>
+    <script>{TAG_ASSIGN_PAGE_SCRIPT}</script>"""
+    return render_page("Unassigned NFC Tag", body, current_spool_id=None, spoolman_base=spoolman_base)
+
+
+def render_duplicate_tag(uid: str, spoolman_base: str) -> HTMLResponse:
+    body = f"""<main class="panel stack">
+      <h1>NFC configuration error</h1>
+      <p>Multiple spools have the same NFC ID.</p>
+      <p>UID: <code>{escape(uid)}</code></p>
+      <p>Check the <code>nfc_id</code> extra fields in Spoolman.</p>
+      <p><a class="button" href="{escape(spoolman_base, quote=True)}" target="_blank" rel="noreferrer">Open Spoolman</a></p>
+    </main>"""
+    return render_page("NFC configuration error", body, current_spool_id=None, spoolman_base=spoolman_base, status_code=409)
+
+
+def render_tag_lookup_failed(uid: str, message: str, spoolman_base: str) -> HTMLResponse:
+    body = f"""<main class="panel stack">
+      <h1>Could not check NFC tag</h1>
+      <p>UID: <code>{escape(uid)}</code></p>
+      <p>{escape(message)}</p>
+      <p><a class="button" href="/">Try again</a></p>
+    </main>"""
+    return render_page("NFC lookup failed", body, current_spool_id=None, spoolman_base=spoolman_base, status_code=502)
 
 
 def render_bin_lookup_failed(location: str, error: Exception, current_spool_id: int | None, spoolman_base: str) -> HTMLResponse:
@@ -276,7 +391,7 @@ def render_spools(current_spool_id: int | None, spoolman_base: str) -> HTMLRespo
       <section class="panel">
         <h1>Spoolman-Compatible Spool QR Labels</h1>
         <p>Create each physical spool in <a href="{escape(spoolman_base, quote=True)}" target="_blank" rel="noreferrer">Spoolman</a>, then load the list below to prepare compatibility QR labels.</p>
-        <p class="muted">For NFC/RFID, use the spool’s Tags section in Spoolman to link its hardware UID. No data needs to be written to the tag. SpoolBud resolves tag associations through Spoolman.</p>
+        <p class="muted">For NFC/RFID, store the hardware UID in the spool’s <code>nfc_id</code> extra field in Spoolman 0.26.x. Write only the stable SpoolBud <code>/tag/&lt;uid&gt;</code> URL to the tag.</p>
       </section>
 
       <section class="panel stack">

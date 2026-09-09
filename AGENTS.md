@@ -4,23 +4,33 @@ Scope: the entire repository. Read this before implementing changes.
 
 ## Product intent and ownership
 
-SpoolBud is a lightweight physical filament workflow UI for Spoolman 0.27+.
+SpoolBud is a lightweight physical filament workflow UI for Spoolman 0.26.x,
+with compatibility seams for later Spoolman releases.
 Spoolman is authoritative for spool inventory, filament metadata, locations, and
-NFC/RFID tag associations. SpoolBud selects a spool and coordinates explicit
-physical actions such as moving/storing it. Printer stations and load/unload
-workflows are future extensions of this boundary.
+the `extra.nfc_id` association used for NFC/RFID. SpoolBud selects a spool and
+coordinates explicit physical actions such as moving/storing it. Printer
+stations and load/unload workflows are future extensions of this boundary.
 
 ## Identity and state rules
 
-- Resolve every new NFC/RFID scan by forwarding its hardware UID to Spoolman's
-  `POST /api/v1/tag/scan`. Only the returned `matched_spool_id` selects a spool.
+- Resolve NFC/RFID URL taps through a compatibility resolver owned by the
+  Spoolman client. On Spoolman 0.26.x, query the spool `nfc_id` extra field and
+  validate the returned value after UID normalization. When a future server
+  advertises native tag lookup, prefer `GET /api/v1/spool?tag=<uid>` and fall
+  back cleanly to `extra.nfc_id` when unsupported or unmatched.
+- Treat `spool.extra.nfc_id` as the current tag association owned by Spoolman;
+  never trust an unvalidated first result from an extra-field query because
+  missing fields or partial filtering can return unrelated spools.
 - Never infer a spool ID from a UID, tag payload, reader ID, or a client-supplied
   match. Never maintain a local UID-to-spool map, cache, or tag database.
-- Do not encode Spoolman IDs into NFC tags or offer NFC tag-writing workflows.
-  Create spools and link/unlink/reassign their tags in Spoolman.
+- Do not encode Spoolman IDs into NFC tags or offer physical NFC tag-writing
+  workflows. An operator may explicitly associate an unknown UID from its
+  `/tag/{uid}` page by selecting an existing Spoolman spool; write the canonical
+  UID to that spool's `nfc_id` while preserving every other extra field.
 - An unknown tag or failed resolution must not leave an older spool selected
   for an accidental move. Show an actionable result; never silently fall back
-  from NFC to QR parsing or create inventory/tag associations automatically.
+  from NFC to QR parsing, create inventory, or associate a UID without an
+  explicit spool choice and confirmation.
 - Browser selection is transient workflow context. Retain the existing cookie
   for compatibility, storing only the selected canonical spool ID. It is not
   an inventory or tag-association store and is not authentication.
@@ -41,10 +51,11 @@ workflows are future extensions of this boundary.
 - Reuse `spoolbud/dependencies.py` as the route-facing runtime boundary instead
   of constructing HTTP clients throughout the application. Keep it small and
   avoid a configuration or dependency-injection framework.
-- Isolate the Spoolman tag HTTP contract and its response validation in the
-  existing client. Pass canonical spool IDs to downstream workflows, never
-  hardware UIDs/payloads. Future NFC work must build on these boundaries rather
-  than placing tag logic or page markup in routes.
+- Isolate UID normalization in `spoolbud/parsing/` and all Spoolman tag lookup
+  contracts and response validation in the existing client. Pass canonical
+  spool IDs to downstream workflows, never hardware UIDs/payloads. Future NFC
+  work must build on these boundaries rather than placing tag logic or page
+  markup in routes.
 - Moves/storage update Spoolman's location through its API. Local destination
   configuration and legacy defaults are shortcuts, not authoritative state;
   successful location changes must be confirmed by Spoolman.
@@ -61,7 +72,9 @@ workflows are future extensions of this boundary.
   `/healthz`, spool QR scanning, and printable bin QR labels.
 - QR parsing continues to support `/spool/show/<id>`, `/spool/<id>`,
   `?spool_id=<id>`, numeric IDs, and `web+spoolman:s-<id>`.
-- Previously written ID-based URL tags may still open the legacy scan route;
+- NFC tags use stable NDEF URLs at `/tag/{uid}`; the UID is resolved server-side
+  on every tap. Do not add browser-side NFC APIs or store a Spoolman ID on the
+  tag. Previously written ID-based URLs may still open the legacy scan route;
   document them as compatibility links, not the new NFC identity model.
 - Scanning selects only. New moves require an explicit user action. Keep legacy
   bin-link move behavior during migration, including its redirect semantics.
@@ -80,10 +93,12 @@ Update this file before changing these ownership or integration boundaries.
 For endpoint changes update `tests/`, `README.md`, and workflow/QR examples.
 For environment changes also update `docker-compose.yml` and CI assumptions.
 
-Cover matched/unknown tags, malformed Spoolman responses, upstream errors,
-no local matching, session isolation, stale selections, and unchanged QR/bin
-contracts. Exercise the actual HTTP request/response boundary with mocked
-transport. Test printer boundaries with fake adapters, never real printers.
+Cover UID normalization, matched/unknown/duplicate tags, assignment to an
+existing spool, preservation of other extra fields, reassignment confirmation,
+malformed Spoolman extra fields and responses, native-lookup fallback, upstream
+errors, session isolation, stale selections, and unchanged QR/bin contracts.
+Exercise the actual HTTP request/response boundary with mocked transport. Test
+printer boundaries with fake adapters, never real printers.
 Use mock inventory for browser tests; report actual hardware testing separately.
 
 Run when feasible:

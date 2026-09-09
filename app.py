@@ -3,6 +3,7 @@
 from spoolbud.application import create_app
 from spoolbud.config import settings
 from spoolbud.dependencies import (
+    fetch_spool_by_tag_uid,
     fetch_spoolman_locations,
     fetch_spoolman_spool,
     fetch_spoolman_spools,

@@ -17,7 +17,6 @@ from spoolbud.services.bins import (
     move_selected_spool_to_bin,
 )
 from spoolbud.services.spool_selection import clear_selected_spool, get_selected_spool, set_selected_spool
-from spoolman_tags import resolve_tag
 
 
 # Module aliases keep tests and transitional deployments easy to configure.
@@ -65,6 +64,19 @@ async def fetch_spoolman_spool(spool_id: int) -> dict[str, Any]:
     return await client().get_spool(spool_id)
 
 
+async def fetch_spool_by_tag_uid(uid: str) -> dict[str, Any] | None:
+    return await client().get_spool_by_tag_uid(uid)
+
+
+async def associate_spool_with_tag_uid(
+    spool_id: int,
+    uid: str,
+    *,
+    replace_existing: bool = False,
+) -> dict[str, Any]:
+    return await client().assign_tag_uid(spool_id, uid, replace_existing=replace_existing)
+
+
 async def fetch_spoolman_locations() -> list[str]:
     return await get_spoolman_locations(fetch_spoolman_spools)
 
@@ -88,4 +100,5 @@ async def move_selected_spool(request: Request, spool_id: int, location: str) ->
 
 
 async def resolve_tag_scan(scan: TagScanRequest) -> int | None:
-    return await resolve_tag(scan, base_url=SPOOLMAN_BASE, headers=client().auth_headers())
+    spool = await fetch_spool_by_tag_uid(scan.uid)
+    return spool["id"] if spool is not None else None
