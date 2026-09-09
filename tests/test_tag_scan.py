@@ -1,213 +1,286 @@
-import json
-
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import app
-import spoolman_tags
 from spoolbud import dependencies as deps
-
-
-@pytest.fixture
-def upstream(monkeypatch):
-    state = {"response": httpx.Response(200, json={"matched_spool_id": 42}), "requests": []}
-    real_client = httpx.AsyncClient
-
-    def handle(request):
-        state["requests"].append(request)
-        assert request.method == "POST"
-        assert request.url.path == "/api/v1/tag/scan"
-        if isinstance(state["response"], Exception):
-            raise state["response"]
-        return state["response"]
-
-    monkeypatch.setattr(spoolman_tags.httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
-    monkeypatch.setattr(deps, "SPOOLMAN_BASE", "https://spoolman.test")
-    return state
+from spoolbud.clients.spoolman import DuplicateTagUIDError, TagLookupError
 
 
 def selected(client):
     return client.get("/status").json()["selected_spool_id"]
 
 
-def test_tag_scan_forwards_contract_and_uses_only_upstream_match(upstream, monkeypatch):
-    monkeypatch.setattr(deps, "API_TOKEN", "test-credential")
-    upstream["response"] = httpx.Response(200, json={"uid": "04A2B3C4", "matched_spool_id": 42, "spool": {"id": 999}})
-    body = {"uid": "04:a2-b3:c4", "reader_id": "desk-1", "name": "Desk", "format": "ntag", "payload_b64": "NDI="}
+def matched_spool():
+    return {
+        "id": 42,
+        "name": "Witchcraft PLA",
+        "location": "F-008",
+        "filament": {"vendor": {"name": "Cookiecad"}, "material": "PLA"},
+        "extra": {"nfc_id": "04A2B3C4"},
+    }
+
+
+def test_tag_url_normalizes_uid_selects_spool_and_shows_shared_destinations(monkeypatch):
+    async def lookup(uid):
+        assert uid == "04A2B3C4"
+        return matched_spool()
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
     with TestClient(app.app) as client:
-        response = client.post("/api/tag/scan", json=body)
+        response = client.get("/tag/04:a2-b3:c4")
+        assert response.status_code == 200
+        assert selected(client) == 42
+    assert "Spool 42 selected" in response.text
+    assert "Cookiecad" in response.text
+    assert "Witchcraft PLA" in response.text
+    assert "Location: F-008" in response.text
+    assert "Choose a destination" in response.text
+    assert "Open bin scanner" in response.text
+    assert "Moved" in response.text
+    assert "Done" in response.text
+    assert 'id="moveDestination"' in response.text
+    assert 'data-spool-id="42"' in response.text
+
+
+def test_same_tag_url_resolves_again_after_spoolman_reassignment(monkeypatch):
+    state = {"spool": matched_spool(), "calls": 0}
+
+    async def lookup(uid):
+        state["calls"] += 1
+        return state["spool"]
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    with TestClient(app.app) as client:
+        first = client.get("/tag/04A2B3C4")
+        assert "Spool 42 selected" in first.text
+        state["spool"] = {**matched_spool(), "id": 77, "name": "Reassigned spool"}
+        second = client.get("/tag/04A2B3C4")
+        assert "Spool 77 selected" in second.text
+        assert selected(client) == 77
+    assert state["calls"] == 2
+
+
+def test_unknown_tag_clears_previous_selection_and_renders_help(monkeypatch):
+    async def lookup(uid):
+        assert uid == "04A2B3C4"
+        return None
+
+    async def spools():
+        return [
+            {"id": 42, "location": "F-008", "filament": {"vendor": {"name": "Cookiecad"}, "material": "PLA"}},
+            {"id": 77, "name": "Backup PETG", "extra": {"nfc_id": "AABBCCDD"}},
+        ]
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", spools)
+    with TestClient(app.app) as client:
+        client.get("/select/99", follow_redirects=False)
+        response = client.get("/tag/04A2B3C4")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert selected(client) is None
+    assert "Unassigned NFC Tag" in response.text
+    assert "04A2B3C4" in response.text
+    assert "Select the Spoolman spool" in response.text
+    assert "Cookiecad" in response.text
+    assert "Backup PETG" in response.text
+    assert "Current NFC ID" in response.text
+    assert "Associate NFC tag" in response.text
+    assert "Open Spoolman" in response.text
+    assert "Try another tag" in response.text
+
+
+def test_assignment_writes_normalized_uid_and_selects_spool(monkeypatch):
+    calls = []
+
+    async def associate(spool_id, uid, *, replace_existing=False):
+        calls.append((spool_id, uid, replace_existing))
+        return {"id": spool_id, "extra": {"nfc_id": uid}}
+
+    monkeypatch.setattr(deps, "associate_spool_with_tag_uid", associate)
+    with TestClient(app.app) as client:
+        response = client.post(
+            "/tag/04:a2-b3:c4/assign",
+            json={"spool_id": 42, "replace_existing": False},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"assigned_spool_id": 42, "uid": "04A2B3C4"}
+        assert response.headers["cache-control"] == "no-store"
+        assert selected(client) == 42
+    assert calls == [(42, "04A2B3C4", False)]
+
+
+def test_first_tap_assignment_then_resolves_to_selected_workflow(monkeypatch):
+    state = {"assigned": False}
+
+    async def lookup(uid):
+        return matched_spool() if state["assigned"] else None
+
+    async def spools():
+        return [matched_spool() | {"extra": {}}]
+
+    async def associate(spool_id, uid, *, replace_existing=False):
+        state["assigned"] = True
+        return matched_spool()
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    monkeypatch.setattr(deps, "fetch_spoolman_spools", spools)
+    monkeypatch.setattr(deps, "associate_spool_with_tag_uid", associate)
+    with TestClient(app.app) as client:
+        first_tap = client.get("/tag/04A2B3C4")
+        assert "Unassigned NFC Tag" in first_tap.text
+        assert selected(client) is None
+        assert client.post("/tag/04A2B3C4/assign", json={"spool_id": 42}).status_code == 200
+        resolved = client.get("/tag/04A2B3C4")
+        assert "Spool 42 selected" in resolved.text
+        assert selected(client) == 42
+
+
+def test_assignment_forwards_explicit_replacement_confirmation(monkeypatch):
+    async def associate(spool_id, uid, *, replace_existing=False):
+        assert replace_existing is True
+        return {"id": spool_id, "extra": {"nfc_id": uid}}
+
+    monkeypatch.setattr(deps, "associate_spool_with_tag_uid", associate)
+    with TestClient(app.app) as client:
+        response = client.post("/tag/04A2B3C4/assign", json={"spool_id": 77, "replace_existing": True})
+    assert response.status_code == 200
+
+
+def test_assignment_failure_is_actionable_and_clears_selection(monkeypatch):
+    async def associate(spool_id, uid, *, replace_existing=False):
+        raise TagLookupError(409, "The selected spool already has a different NFC ID.")
+
+    monkeypatch.setattr(deps, "associate_spool_with_tag_uid", associate)
+    with TestClient(app.app) as client:
+        client.get("/select/99", follow_redirects=False)
+        response = client.post("/tag/04A2B3C4/assign", json={"spool_id": 42})
+        assert response.status_code == 409
+        assert "different NFC ID" in response.json()["detail"]
+        assert selected(client) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"spool_id": 0}, {"spool_id": True}, {"spool_id": 42, "unexpected": True}],
+)
+def test_invalid_assignment_never_writes_and_clears_selection(monkeypatch, body):
+    async def unexpected_associate(spool_id, uid, *, replace_existing=False):
+        pytest.fail("Invalid assignments must not reach Spoolman")
+
+    monkeypatch.setattr(deps, "associate_spool_with_tag_uid", unexpected_associate)
+    with TestClient(app.app) as client:
+        client.get("/select/99", follow_redirects=False)
+        response = client.post("/tag/04A2B3C4/assign", json=body)
+        assert response.status_code == 400
+        assert selected(client) is None
+
+
+def test_invalid_tag_never_calls_spoolman_and_clears_selection(monkeypatch):
+    async def unexpected_lookup(uid):
+        pytest.fail("Invalid UIDs must not reach Spoolman")
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", unexpected_lookup)
+    with TestClient(app.app) as client:
+        client.get("/select/99", follow_redirects=False)
+        response = client.get("/tag/04A2ZZ")
+        assert response.status_code == 400
+        assert selected(client) is None
+    assert "Invalid NFC Tag" in response.text
+
+
+def test_invalid_tag_page_escapes_user_input(monkeypatch):
+    async def unexpected_lookup(uid):
+        pytest.fail("Invalid UIDs must not reach Spoolman")
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", unexpected_lookup)
+    with TestClient(app.app) as client:
+        response = client.get("/tag/%3Cimg%20src=x%20onerror=alert(1)%3E")
+    assert response.status_code == 400
+    assert "<img src=x" not in response.text
+    assert "&lt;img src=x" in response.text
+
+
+def test_duplicate_uid_is_configuration_error_and_logs_spool_ids(monkeypatch, caplog):
+    async def lookup(uid):
+        raise DuplicateTagUIDError([42, 77])
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    with TestClient(app.app) as client:
+        response = client.get("/tag/04A2B3C4")
+        assert response.status_code == 409
+        assert selected(client) is None
+    assert "NFC configuration error" in response.text
+    assert "Multiple spools have the same NFC ID" in response.text
+    assert "42, 77" in caplog.text
+
+
+def test_spoolman_failure_is_actionable_and_clears_selection(monkeypatch):
+    async def lookup(uid):
+        raise TagLookupError(502, "Could not reach Spoolman. Check its connection, then try again.")
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    with TestClient(app.app) as client:
+        client.get("/select/99", follow_redirects=False)
+        response = client.get("/tag/04A2B3C4")
+        assert response.status_code == 502
+        assert selected(client) is None
+    assert "Could not check NFC tag" in response.text
+    assert "Check its connection" in response.text
+
+
+def test_api_scan_uses_compatibility_resolver_and_normalizes_uid(monkeypatch):
+    async def lookup(uid):
+        assert uid == "04A2B3C4"
+        return matched_spool()
+
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
+    with TestClient(app.app) as client:
+        response = client.post("/api/tag/scan", json={"uid": "04:a2-b3:c4", "reader_id": "desk-1"})
         assert response.json() == {"matched_spool_id": 42}
         assert selected(client) == 42
-    assert len(upstream["requests"]) == 1
-    request = upstream["requests"][0]
-    assert json.loads(request.content) == body
-    assert request.headers["authorization"] == "Bearer test-credential"
-    assert "test-credential" not in response.text
 
 
-def test_unknown_numeric_uid_does_not_fall_back_to_spool_id(upstream):
-    upstream["response"] = httpx.Response(200, json={"matched_spool_id": None, "spool": {"id": 99}})
-    with TestClient(app.app) as client:
-        client.get("/select/99", follow_redirects=False)
-        response = client.post("/api/tag/scan", json={"uid": "42"})
-        assert response.status_code == 200
-        assert response.json()["matched_spool_id"] is None
-        assert "Link it in Spoolman" in response.text
-        assert selected(client) is None
-    assert json.loads(upstream["requests"][0].content) == {"uid": "42"}
+@pytest.mark.parametrize("body", [{}, [], {"uid": ""}, {"uid": 42}, {"uid": "04A2?B3"}, {"uid": "AA", "spool_id": 42}])
+def test_invalid_api_scan_clears_selection_without_lookup(monkeypatch, body):
+    async def unexpected_lookup(uid):
+        pytest.fail("Invalid API scans must not reach Spoolman")
 
-
-def test_repeated_scans_resolve_again_after_upstream_reassignment(upstream):
-    with TestClient(app.app) as client:
-        assert client.post("/api/tag/scan", json={"uid": "04AABB"}).json()["matched_spool_id"] == 42
-        upstream["response"] = httpx.Response(200, json={"matched_spool_id": 77})
-        assert client.post("/api/tag/scan", json={"uid": "04AABB"}).json()["matched_spool_id"] == 77
-        assert selected(client) == 77
-    assert len(upstream["requests"]) == 2
-
-
-@pytest.mark.parametrize("result", [{}, {"spool": {"id": 42}}, [], {"matched_spool_id": "42"},
-                                         {"matched_spool_id": True}, {"matched_spool_id": 42.0},
-                                         {"matched_spool_id": 0}, {"matched_spool_id": -1}])
-def test_invalid_match_response_clears_previous_selection(upstream, result):
-    upstream["response"] = httpx.Response(200, json=result)
-    with TestClient(app.app) as client:
-        client.get("/select/99", follow_redirects=False)
-        response = client.post("/api/tag/scan", json={"uid": "04AABB"})
-        assert response.status_code == 502
-        assert selected(client) is None
-
-
-@pytest.mark.parametrize("status, expected, message", [
-    (400, 400, "rejected the scan"), (422, 400, "rejected the scan"),
-    (401, 502, "credentials"), (403, 502, "credentials"),
-    (404, 502, "0.27+"), (405, 502, "0.27+"), (501, 502, "0.27+"),
-    (429, 502, "service is available"), (500, 502, "service is available"),
-    (302, 502, "service is available"),
-])
-def test_upstream_errors_are_actionable_and_never_expose_body(upstream, status, expected, message):
-    upstream["response"] = httpx.Response(status, text="secret-upstream-details", headers={"location": "https://other.test"})
-    with TestClient(app.app) as client:
-        client.get("/select/99", follow_redirects=False)
-        response = client.post("/api/tag/scan", json={"uid": "04AABB"})
-        assert response.status_code == expected
-        assert message in response.text
-        assert "secret-upstream-details" not in response.text
-        assert selected(client) is None
-        # An unavailable tag API must not disable legacy selection.
-        assert client.get("/scan?value=42", follow_redirects=False).status_code == 302
-        assert selected(client) == 42
-    assert len(upstream["requests"]) == 1  # No redirect or retry.
-
-
-@pytest.mark.parametrize("failure", [httpx.ConnectError("secret"), httpx.ReadTimeout("secret"),
-                                      httpx.Response(200, text="not JSON secret")])
-def test_transport_or_json_failure_clears_selection(upstream, failure):
-    upstream["response"] = failure
-    with TestClient(app.app) as client:
-        client.get("/select/99", follow_redirects=False)
-        response = client.post("/api/tag/scan", json={"uid": "04AABB"})
-        assert response.status_code == 502
-        assert "secret" not in response.text
-        assert selected(client) is None
-
-
-@pytest.mark.parametrize("body", [{}, [], {"uid": ""}, {"uid": 42}, {"uid": "A" * 129},
-                                  {"uid": "AA", "reader_id": "has spaces"},
-                                  {"uid": "AA", "payload_b64": "x" * 8193},
-                                  {"uid": "AA", "matched_spool_id": 42},
-                                  {"uid": "AA", "spool_id": 42}])
-def test_invalid_client_scan_clears_selection_without_upstream_call(upstream, body):
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", unexpected_lookup)
     with TestClient(app.app) as client:
         client.get("/select/99", follow_redirects=False)
         assert client.post("/api/tag/scan", json=body).status_code == 400
         assert selected(client) is None
-    assert not upstream["requests"]
 
 
-@pytest.mark.parametrize("content, content_type", [("{bad", "application/json"), ('{"uid":"AA"}', "text/plain")])
-def test_malformed_json_or_wrong_content_type_clears_selection(upstream, content, content_type):
-    with TestClient(app.app) as client:
-        client.get("/select/99", follow_redirects=False)
-        assert client.post("/api/tag/scan", content=content, headers={"content-type": content_type}).status_code == 400
-        assert selected(client) is None
-    assert not upstream["requests"]
-
-
-def test_device_scan_does_not_select_an_unrelated_browser(upstream):
-    with TestClient(app.app) as browser, TestClient(app.app) as device:
-        browser.get("/select/99", follow_redirects=False)
-        device.post("/api/tag/scan", json={"uid": "AA", "reader_id": "printer-1"})
-        assert selected(device) == 42
-        assert selected(browser) == 99
-
-
-def test_tag_selection_opens_shared_actions_without_qr_parsing(upstream, monkeypatch):
-    async def metadata(spool_id):
-        assert spool_id == 42
-        return {"id": 42, "name": "Matched spool", "location": "F-001"}
-
-    def no_qr_fallback(value):
-        # Numeric cookie parsing is still part of the legacy session contract.
-        assert value in {"", "42"}
-        return int(value) if value else None
-
-    monkeypatch.setattr(deps, "fetch_spoolman_spool", metadata)
-    monkeypatch.setattr(deps, "extract_spool_id", no_qr_fallback)
-    with TestClient(app.app) as client:
-        client.post("/api/tag/scan", json={"uid": "04-AA-BB"})
-        page = client.get("/selected?spool_id=999")
-        assert page.status_code == 200
-        assert page.headers["cache-control"] == "no-store"
-        assert "Spool 42 selected" in page.text
-        assert "Matched spool" in page.text
-        assert 'data-spool-id="42"' in page.text
-        assert "Spool 999 selected" not in page.text
-        assert "set-cookie" not in page.headers  # Viewing cannot reselect an old spool.
-
-
-@pytest.mark.parametrize("action", ["api", "bin"])
-def test_resolved_spool_moves_only_after_explicit_action(upstream, monkeypatch, action):
+def test_tag_selected_spool_moves_through_existing_location_workflow(monkeypatch):
     moves = []
+
+    async def lookup(uid):
+        return matched_spool()
 
     async def patch(spool_id, location):
         moves.append((spool_id, location))
         return httpx.Response(200, request=httpx.Request("PATCH", "https://spoolman.test"))
 
+    monkeypatch.setattr(deps, "fetch_spool_by_tag_uid", lookup)
     monkeypatch.setattr(deps, "patch_spool_location", patch)
     with TestClient(app.app) as client:
-        client.post("/api/tag/scan", json={"uid": "999"})
-        assert not moves
-        response = (client.post("/api/move", json={"spool_id": 42, "location": "F-002"}) if action == "api"
-                    else client.get("/bin/F-002?stay=1"))
-        assert response.status_code == 200
-        assert moves == [(42, "F-002")]
+        client.get("/tag/04A2B3C4")
+        response = client.post("/api/move", json={"spool_id": 42, "location": "f-012"})
+        assert response.json() == {"spool_id": 42, "location": "F-012"}
         assert selected(client) is None
-        assert client.get("/selected").status_code == 409
+    assert moves == [(42, "F-012")]
 
 
-def test_unknown_scan_removes_access_to_previous_actions(upstream):
-    with TestClient(app.app) as client:
-        client.post("/api/tag/scan", json={"uid": "AA"})
-        upstream["response"] = httpx.Response(200, json={"matched_spool_id": None})
-        client.post("/api/tag/scan", json={"uid": "BB"})
-        page = client.get("/selected")
-        assert page.status_code == 409
-        assert "No spool selected" in page.text
-        assert 'id="selectionActions"' not in page.text
-
-
-def test_scan_ui_and_qr_pages_no_longer_offer_nfc_writing():
+def test_home_explains_iphone_url_flow_without_browser_nfc_api():
     with TestClient(app.app) as client:
         home = client.get("/").text
-        assert "Tag UID" in home and "Reader ID" in home
-        assert "/api/tag/scan" in home
-        assert 'window.location.href = "/selected"' in home
-        assert "iPhone Safari needs a reader" in home
-        for route in ["/", "/spools", "/bins"]:
-            page = client.get(route).text
-            assert "Copy NFC link" not in page
-            assert "NFC Tools" not in page
-            assert "clipboard.writeText" not in page
-        assert "Tags section in Spoolman" in client.get("/spools").text
+        spools = client.get("/spools").text
+    assert "/tag/04A2B3C4D5E6F7" in home
+    assert "does not use Web NFC" in home
+    assert "NDEFReader" not in home
+    assert "readNfc" not in home
+    assert "extra field" in spools
+    assert "/tag/&lt;uid&gt;" in spools

@@ -1,82 +1,80 @@
-# Spoolman tag identity migration
+# Spoolman NFC compatibility migration
 
-This migration replaces the earlier uncommitted URL-tag prototype. The existing
-branch also contains its destination picker, QR improvements, and tests; these
-are retained where compatible. No tag database or tag writer is being added.
+This refinement replaces the earlier 0.27-only tag-scanner design after confirming
+that Spoolman 0.27 is not yet released. SpoolBud remains additive: existing spool
+QRs, bin QRs, selection cookies, and location updates keep their current contracts.
 
-## Review phases
+## Current source of truth
 
-0. **Architecture first:** update `AGENTS.md` before implementation and record
-   ownership, compatibility rules, and this phased plan. Establish the existing
-   34-test baseline.
-1. **Spoolman tag resolution:** add a narrowly scoped HTTP integration and a
-   session-aware scan endpoint. Trust only `matched_spool_id`, clear selection
-   for unknown/error results, and test the real wire contract with mock HTTP.
-2. **Workflow UI migration:** add UID/reader input, reuse the selected-spool
-   screen without routing NFC through QR parsing, and remove NFC-writing tools.
-   Retain spool/bin QR labels and existing URL entry points. Document linking
-   tags in Spoolman and browser/device session boundaries. Test tag-to-move and
-   legacy behavior; check the browser with mock inventory.
-3. **Future station boundary:** define a minimal vendor-neutral printer adapter
-   contract for load/unload, separate from inventory/location operations. Test
-   with a fake adapter; document what a future FilaBridge adapter must supply.
-   No printer actions are advertised as implemented in this migration.
+Spoolman 0.26.x and SpoolSense associate an NFC hardware UID with a spool through:
 
-Each phase gets a separate local commit after its tests pass; the earlier
-prototype is preserved as a distinct baseline commit so the migration diffs
-can be reviewed independently. No remote push or deployment is included.
+```text
+spool.extra.nfc_id
+```
 
-## Sources and compatibility
+SpoolBud does not create a UID database or cache. It queries Spoolman for every
+tap, validates the returned extra field after normalization, and sends only the
+matched spool ID into the common selection and destination workflow.
 
-- [Spoolman tag scanners](https://github.com/Donkie/Spoolman/wiki/Tag-scanners)
-- [Spoolman API reference](https://donkie.github.io/Spoolman/)
+The tagged Spoolman 0.26 source confirms the supported filter is:
 
-Tag scanning requires Spoolman 0.27+; earlier servers keep the QR/move path but
-receive an upgrade message when the tag endpoint is unavailable. Physical tag
-readers and iPhone companion-app integration require a separate hardware pilot.
+```text
+GET /api/v1/spool?extra.nfc_id=<uid>
+```
 
-## Phase 1 result
+The filter is not treated as authoritative by itself: missing extra-field
+configuration or partial matching can return unrelated rows. Zero locally
+validated matches is an unassigned tag; multiple validated matches is an
+operator configuration error.
 
-Implemented `spoolman_tags.py` and `/api/tag/scan` with per-request matching and
-explicit failures. All 70 tests pass, including contract forwarding, upstream
-reassignment, rejection of client-supplied matches, session isolation, malformed
-input/responses, upstream errors, and the 34 compatibility tests. Docker now
-copies the integration module. The source API was checked directly because the
-published generated OpenAPI reference did not include the tag endpoints:
-[upstream tag.py](https://github.com/Donkie/Spoolman/blob/master/spoolman/api/v1/tag.py).
+## iPhone entry point
 
-## Phase 2 result
+New NFC labels contain a stable NDEF URL:
 
-The home page accepts reader-entered/pasted UIDs and offers read-only Web NFC
-when supported. NFC responses navigate to `/selected`, which reads workflow
-context without parsing QR data or reselecting an ID. Legacy QR URLs reuse the
-same action renderer. NFC-writing controls and instructions have been removed;
-Spoolman linking and iPhone/session limitations are documented in README.
+```text
+https://<spoolbud>/tag/<uid>
+```
 
-All 75 tests pass. Browser verification with a mock upstream covered keyboard
-UID submission, selection, explicit storage, unknown tags clearing a previous
-selection, and QR label generation. Embedded JavaScript syntax checks passed.
-Physical Web NFC and external reader hardware still require a deployment pilot.
+The iPhone opens that URL. There is no Safari Web NFC integration and no spool ID
+on the tag. After lookup, `/tag/{uid}` renders the same selected-spool destination
+page used by QR selection.
 
-## Phase 3 result
+## First-tap association
 
-Added the small `PrinterIntegration` protocol and explicit load/unload dispatcher
-in `printer_workflows.py`, independently of tag resolution and storage updates.
-It rejects invalid identities/targets, fails without an adapter, and propagates
-uncertain results without retry. README specifies the responsibilities of a
-future FilaBridge or other adapter and of future session-aware action routes.
-All 87 tests pass, including fake-adapter dispatch and failure coverage. No real
-printer action, printer endpoint, or new persistent state has been introduced.
+When `/tag/{uid}` has no validated match, SpoolBud clears any older selection
+and renders **Unassigned NFC Tag** with a searchable list of existing Spoolman
+spools. The operator chooses a spool and explicitly submits the association.
+SpoolBud then:
 
-## Final validation
+1. re-checks that the UID was not associated while the page was open;
+2. reloads the selected spool and preserves all of its existing extra fields;
+3. requires confirmation before replacing a different `nfc_id`;
+4. patches the merged extra-field object with the canonical UID; and
+5. verifies Spoolman's response before selecting the spool.
 
-The tag request model requires Pydantic 2, now declared explicitly in runtime
-requirements instead of relying on FastAPI's broader transitive requirement.
-Reader ID validation stays on the server so invalid submissions clear the old
-selection through the same error path as other invalid scans.
+This creates no local mapping and no new spool. It is a server-side metadata
+update to the authoritative Spoolman record. Errors clear the browser selection
+and leave an actionable message on the assignment page.
 
-The full 87-test suite and embedded JavaScript syntax checks pass. Compose
-configuration validation passes. The container build could not run because the
-local Docker daemon is stopped; it still needs verification in CI or with Docker
-running. Browser checks used mock inventory, not a live Spoolman server or
-physical NFC/RFID reader.
+## Future native lookup
+
+The Spoolman client owns the version boundary. It consults the server's documented
+`/api/v1/info` response, and only a server advertising 0.27+ is queried with:
+
+```text
+GET /api/v1/spool?tag=<uid>
+```
+
+An unsupported or unmatched native query falls back to `extra.nfc_id`. This keeps
+0.26 functional without depending on unreleased behavior and gives native tag
+support one isolated seam when 0.27 ships.
+
+## Verification
+
+Automated coverage includes UID normalization, valid/no/duplicate legacy matches,
+first-tap assignment, preservation of unrelated extra fields, confirmed
+replacement, stale-page conflicts, malformed extra fields, native capability and
+fallback, transport failures, `/tag/{uid}` result pages, selection-to-location
+movement, invalid destinations, and the unchanged QR/bin contracts. Hardware
+validation still requires an iPhone and a physical NDEF URL tag in the deployed
+environment.
