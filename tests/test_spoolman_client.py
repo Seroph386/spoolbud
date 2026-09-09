@@ -76,14 +76,14 @@ def test_legacy_tag_lookup_uses_safe_extra_filter_and_validates_matches():
             200,
             json=[
                 {"id": 77, "extra": {"nfc_id": "04A2B3C4FF"}},
-                {"id": 42, "extra": {"nfc_id": "04:a2:b3:c4"}},
+                {"id": 42, "extra": {"nfc_id": '"04:a2:b3:c4"'}},
                 {"id": 88, "extra": {"nfc_id": "malformed?"}},
                 {"id": 99, "extra": {"nfc_id": 1234}},
             ],
         )
 
     spool = asyncio.run(client_for(handler).get_spool_by_tag_uid("04-A2-B3-C4"))
-    assert spool == {"id": 42, "extra": {"nfc_id": "04:a2:b3:c4"}}
+    assert spool == {"id": 42, "extra": {"nfc_id": '"04:a2:b3:c4"'}}
     assert len(requests) == 2
 
 
@@ -205,19 +205,17 @@ def test_assign_tag_uid_preserves_other_extra_fields_and_verifies_write():
             assert dict(request.url.params) == {"extra.nfc_id": "04A2B3C4"}
             return httpx.Response(200, json=[])
         if request.url.path == "/api/v1/spool/42" and request.method == "GET":
-            return httpx.Response(200, json={"id": 42, "extra": {"drying_temperature": "55", "note": None}})
+            return httpx.Response(200, json={"id": 42, "extra": {"drying_temperature": "55"}})
         assert request.url.path == "/api/v1/spool/42"
         assert request.method == "PATCH"
-        assert json.loads(request.content) == {
-            "extra": {"drying_temperature": "55", "note": None, "nfc_id": "04A2B3C4"}
-        }
+        assert json.loads(request.content) == {"extra": {"nfc_id": '"04A2B3C4"'}}
         return httpx.Response(
             200,
-            json={"id": 42, "extra": {"drying_temperature": "55", "note": None, "nfc_id": "04A2B3C4"}},
+            json={"id": 42, "extra": {"drying_temperature": "55", "nfc_id": '"04A2B3C4"'}},
         )
 
     spool = asyncio.run(client_for(handler).assign_tag_uid(42, "04:a2-b3:c4"))
-    assert spool["extra"]["nfc_id"] == "04A2B3C4"
+    assert spool["extra"]["nfc_id"] == '"04A2B3C4"'
     assert len(requests) == 4
 
 
@@ -229,7 +227,7 @@ def test_assign_tag_uid_requires_confirmation_before_replacing_existing_uid():
             return httpx.Response(200, json=[])
         if request.method == "PATCH":
             pytest.fail("An unconfirmed replacement must not be written")
-        return httpx.Response(200, json={"id": 42, "extra": {"nfc_id": "AABBCCDD", "note": "keep"}})
+        return httpx.Response(200, json={"id": 42, "extra": {"nfc_id": '"AABBCCDD"', "note": '"keep"'}})
 
     with pytest.raises(TagAssignmentError) as exc_info:
         asyncio.run(client_for(handler).assign_tag_uid(42, "04A2B3C4"))
@@ -244,12 +242,12 @@ def test_assign_tag_uid_replaces_existing_uid_only_when_confirmed():
         if request.url.path == "/api/v1/spool":
             return httpx.Response(200, json=[])
         if request.method == "GET":
-            return httpx.Response(200, json={"id": 42, "extra": {"nfc_id": "AABBCCDD", "note": "keep"}})
-        assert json.loads(request.content) == {"extra": {"nfc_id": "04A2B3C4", "note": "keep"}}
-        return httpx.Response(200, json={"id": 42, "extra": {"nfc_id": "04A2B3C4", "note": "keep"}})
+            return httpx.Response(200, json={"id": 42, "extra": {"nfc_id": '"AABBCCDD"', "note": '"keep"'}})
+        assert json.loads(request.content) == {"extra": {"nfc_id": '"04A2B3C4"'}}
+        return httpx.Response(200, json={"id": 42, "extra": {"nfc_id": '"04A2B3C4"', "note": '"keep"'}})
 
     spool = asyncio.run(client_for(handler).assign_tag_uid(42, "04A2B3C4", replace_existing=True))
-    assert spool["extra"] == {"nfc_id": "04A2B3C4", "note": "keep"}
+    assert spool["extra"] == {"nfc_id": '"04A2B3C4"', "note": '"keep"'}
 
 
 def test_assign_tag_uid_rechecks_for_new_association_before_writing():
@@ -257,7 +255,7 @@ def test_assign_tag_uid_rechecks_for_new_association_before_writing():
         if request.url.path == "/api/v1/info":
             return httpx.Response(200, json={"version": "0.26.0"})
         if request.url.path == "/api/v1/spool":
-            return httpx.Response(200, json=[{"id": 77, "extra": {"nfc_id": "04A2B3C4"}}])
+            return httpx.Response(200, json=[{"id": 77, "extra": {"nfc_id": '"04A2B3C4"'}}])
         pytest.fail("A tag assigned while the page was open must not be reassigned")
 
     with pytest.raises(TagAssignmentError) as exc_info:

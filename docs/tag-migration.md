@@ -13,8 +13,8 @@ spool.extra.nfc_id
 ```
 
 SpoolBud does not create a UID database or cache. It queries Spoolman for every
-tap, validates the returned extra field after normalization, and sends only the
-matched spool ID into the common selection and destination workflow.
+tap, JSON-decodes the returned text extra, validates it after normalization, and
+sends only the matched spool ID into the common selection and destination workflow.
 
 The tagged Spoolman 0.26 source confirms the supported filter is:
 
@@ -47,9 +47,10 @@ spools. The operator chooses a spool and explicitly submits the association.
 SpoolBud then:
 
 1. re-checks that the UID was not associated while the page was open;
-2. reloads the selected spool and preserves all of its existing extra fields;
+2. reloads the selected spool and decodes its current `nfc_id`;
 3. requires confirmation before replacing a different `nfc_id`;
-4. patches the merged extra-field object with the canonical UID; and
+4. JSON-encodes the canonical UID and patches only that extra-field key (the
+   Spoolman API merges it without changing other extras); and
 5. verifies Spoolman's response before selecting the spool.
 
 This creates no local mapping and no new spool. It is a server-side metadata

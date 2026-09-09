@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from spoolbud.parsing.extra_fields import decode_text_extra, encode_text_extra
 from spoolbud.parsing.tag_uids import normalize_uid
 
 
@@ -140,10 +141,10 @@ class SpoolmanClient:
                 if not isinstance(extra, dict):
                     raise TagAssignmentError(502, "The selected spool has invalid extra fields. The NFC tag was not associated.")
 
-                stored_uid = extra.get("nfc_id")
+                stored_uid = decode_text_extra(extra.get("nfc_id"))
                 if stored_uid is not None:
                     try:
-                        same_uid = isinstance(stored_uid, str) and normalize_uid(stored_uid) == canonical_uid
+                        same_uid = normalize_uid(stored_uid) == canonical_uid
                     except ValueError:
                         same_uid = False
                     if same_uid:
@@ -154,11 +155,10 @@ class SpoolmanClient:
                             "The selected spool already has a different NFC ID. Confirm replacement and try again.",
                         )
 
-                updated_extra = {**extra, "nfc_id": canonical_uid}
                 response = await client.patch(
                     f"{self.base_url}/api/v1/spool/{spool_id}",
                     headers=headers,
-                    json={"extra": updated_extra},
+                    json={"extra": {"nfc_id": encode_text_extra(canonical_uid)}},
                 )
                 if response.status_code in {401, 403}:
                     raise TagAssignmentError(502, "Spoolman denied the NFC update. Check the configured API credentials.")
@@ -177,12 +177,16 @@ class SpoolmanClient:
                 except ValueError:
                     raise TagAssignmentError(502, "Spoolman did not confirm the NFC association. Check the spool before retrying.") from None
                 updated_extra_payload = updated_spool.get("extra") if isinstance(updated_spool, dict) else None
-                updated_uid = updated_extra_payload.get("nfc_id") if isinstance(updated_extra_payload, dict) else None
+                updated_uid = (
+                    decode_text_extra(updated_extra_payload.get("nfc_id"))
+                    if isinstance(updated_extra_payload, dict)
+                    else None
+                )
                 try:
                     write_confirmed = (
                         isinstance(updated_spool, dict)
                         and updated_spool.get("id") == spool_id
-                        and isinstance(updated_uid, str)
+                        and updated_uid is not None
                         and normalize_uid(updated_uid) == canonical_uid
                     )
                 except ValueError:
@@ -287,8 +291,8 @@ class SpoolmanClient:
         matches: list[dict[str, Any]] = []
         for spool in self._payload_spools(response):
             extra = spool.get("extra")
-            stored_uid = extra.get("nfc_id") if isinstance(extra, dict) else None
-            if not isinstance(stored_uid, str):
+            stored_uid = decode_text_extra(extra.get("nfc_id")) if isinstance(extra, dict) else None
+            if stored_uid is None:
                 continue
             try:
                 if normalize_uid(stored_uid) == uid:

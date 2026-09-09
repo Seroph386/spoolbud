@@ -41,7 +41,7 @@ async def select_spool_by_tag(uid: str) -> HTMLResponse:
         spool = await deps.fetch_spool_by_tag_uid(canonical_uid)
     except DuplicateTagUIDError as exc:
         logger.warning("Duplicate nfc_id configuration matched spool IDs %s", exc.spool_ids)
-        return clear_tag_selection(render_duplicate_tag(canonical_uid, deps.SPOOLMAN_BASE))
+        return clear_tag_selection(render_duplicate_tag(canonical_uid, exc.spool_ids, deps.SPOOLMAN_BASE))
     except TagLookupError as exc:
         return clear_tag_selection(render_tag_lookup_failed(canonical_uid, str(exc), deps.SPOOLMAN_BASE))
 
